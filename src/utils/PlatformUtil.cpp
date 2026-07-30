@@ -66,6 +66,67 @@ std::string MatchEntryIgnoringCase(const std::string& dir, const std::string& wa
 	auto match = cached->second.find(needle);
 	return match == cached->second.end() ? std::string() : match->second;
 }
+
+// Shared walker behind both public resolvers. `keepUnmatchedTail` decides what
+// happens at the first component with no match on disk: the read-oriented
+// resolver throws away its corrections so the caller fails on the name it asked
+// for, while the write-oriented one keeps them and spells the remainder
+// verbatim, since those components are about to be created.
+std::string ResolvePathComponents(const std::string& path, bool keepUnmatchedTail) {
+	if (path.empty() || PathExists(path))
+		return path;
+
+	const bool absolute = (path[0] == '/');
+	std::string resolved = absolute ? "/" : "";
+	bool exhausted = false;
+
+	for (size_t i = absolute ? 1 : 0; i < path.size();) {
+		const size_t separator = path.find('/', i);
+		const size_t end = (separator == std::string::npos) ? path.size() : separator;
+		const std::string part = path.substr(i, end - i);
+		i = (separator == std::string::npos) ? path.size() : separator + 1;
+
+		if (part.empty())
+			continue;
+
+		const auto join = [&resolved](const std::string& name) {
+			if (resolved.empty())
+				return name;
+			if (resolved == "/")
+				return "/" + name;
+			return resolved + "/" + name;
+		};
+
+		// Nothing below a missing component can exist, so stop scanning.
+		if (exhausted) {
+			resolved = join(part);
+			continue;
+		}
+
+		// Prefer the spelling that was asked for; only fall back to a scan when
+		// that component genuinely is not there. This keeps a fully correct path
+		// free of directory listings even when an earlier component was fixed.
+		const std::string candidate = join(part);
+		if (PathExists(candidate)) {
+			resolved = candidate;
+			continue;
+		}
+
+		const std::string match = MatchEntryIgnoringCase(resolved.empty() ? "." : resolved, part);
+		if (match.empty()) {
+			if (!keepUnmatchedTail)
+				return path; // Nothing matches; let the caller fail on what it asked for.
+
+			exhausted = true;
+			resolved = candidate;
+			continue;
+		}
+
+		resolved = join(match);
+	}
+
+	return resolved.empty() ? path : resolved;
+}
 #endif
 
 // True for any fopen() mode that can create or modify the file.
@@ -116,46 +177,15 @@ std::string ResolveCaseInsensitivePath(const std::string& path) {
 #ifdef _WINDOWS
 	return path;
 #else
-	if (path.empty() || PathExists(path))
-		return path;
+	return ResolvePathComponents(path, false);
+#endif
+}
 
-	const bool absolute = (path[0] == '/');
-	std::string resolved = absolute ? "/" : "";
-
-	for (size_t i = absolute ? 1 : 0; i < path.size();) {
-		const size_t separator = path.find('/', i);
-		const size_t end = (separator == std::string::npos) ? path.size() : separator;
-		const std::string part = path.substr(i, end - i);
-		i = (separator == std::string::npos) ? path.size() : separator + 1;
-
-		if (part.empty())
-			continue;
-
-		const auto join = [&resolved](const std::string& name) {
-			if (resolved.empty())
-				return name;
-			if (resolved == "/")
-				return "/" + name;
-			return resolved + "/" + name;
-		};
-
-		// Prefer the spelling that was asked for; only fall back to a scan when
-		// that component genuinely is not there. This keeps a fully correct path
-		// free of directory listings even when an earlier component was fixed.
-		const std::string candidate = join(part);
-		if (PathExists(candidate)) {
-			resolved = candidate;
-			continue;
-		}
-
-		const std::string match = MatchEntryIgnoringCase(resolved.empty() ? "." : resolved, part);
-		if (match.empty())
-			return path; // Nothing matches; let the caller fail on what it asked for.
-
-		resolved = join(match);
-	}
-
-	return resolved.empty() ? path : resolved;
+std::string ResolveExistingPathPrefix(const std::string& path) {
+#ifdef _WINDOWS
+	return path;
+#else
+	return ResolvePathComponents(path, true);
 #endif
 }
 

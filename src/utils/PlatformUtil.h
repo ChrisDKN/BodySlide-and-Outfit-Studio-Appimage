@@ -37,6 +37,18 @@ std::wstring MultiByteToWideUTF8(const std::string& str);
 /// no case-insensitive match is found. On Windows this is the identity function.
 std::string ResolveCaseInsensitivePath(const std::string& path);
 
+/// Correct the case of the leading components of `path` that already exist,
+/// leaving the rest spelled exactly as asked for.
+///
+/// This is the counterpart of ResolveCaseInsensitivePath() for paths being
+/// written. A build whose .osp says "Meshes\Armor" must land in an existing
+/// "meshes/armor" rather than creating a second tree that differs from it only
+/// by case. Where that function gives up and returns the original path as soon
+/// as a component has no match, this one keeps the corrections it has made and
+/// spells the remainder as requested, because those components are about to be
+/// created. On Windows this is the identity function.
+std::string ResolveExistingPathPrefix(const std::string& path);
+
 /// Opens a file stream. On case-sensitive filesystems a failed *read* is retried
 /// once via ResolveCaseInsensitivePath(). Writes are never redirected: creating a
 /// file must use the name the caller chose.

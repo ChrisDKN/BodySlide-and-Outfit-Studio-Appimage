@@ -3418,9 +3418,12 @@ int BodySlideApp::BuildBodies(bool localPath, bool clean, bool tri, bool forceNo
 			Config.SetValue("GameDataPath", response.ToUTF8().data());
 		}
 
-		outFileNameSmall = GetOutputDataPath() + activeSet.GetOutputFilePath();
+		// See the batch build: resolve the directory against the existing tree so
+		// a differently-cased .osp does not create a parallel one.
+		const std::string outputDir = PlatformUtil::ResolveExistingPathPrefix(GetOutputDataPath() + activeSet.GetOutputPath());
+		outFileNameSmall = outputDir + PathSepStr + activeSet.GetOutputFile();
 		outFileNameBig = outFileNameSmall;
-		wxString path = wxString::FromUTF8(GetOutputDataPath() + activeSet.GetOutputPath());
+		wxString path = wxString::FromUTF8(outputDir);
 		wxFileName::Mkdir(path, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
 	}
 
@@ -4252,18 +4255,22 @@ int BodySlideApp::BuildListBodies(
 		if (clean && custPath.empty()) {
 			bool genWeights = currentSet.GenWeights();
 
-			wxString removePath = wxString::FromUTF8(datapath + currentSet.GetOutputFilePath());
-			wxString removeHigh = removePath + ".nif";
-			if (genWeights)
-				removeHigh = removePath + "_1.nif";
+			// Resolved rather than used verbatim: cleaning has to find what is
+			// actually on disk, which may be cased differently from what the set
+			// asks for, otherwise the stale build is silently left behind.
+			const std::string removePath = datapath + currentSet.GetOutputFilePath();
+			const auto resolveForRemoval = [](const std::string& path) {
+				return wxString::FromUTF8(PlatformUtil::ResolveCaseInsensitivePath(path));
+			};
 
+			wxString removeHigh = resolveForRemoval(removePath + (genWeights ? "_1.nif" : ".nif"));
 			if (wxFileName::FileExists(removeHigh))
 				wxRemoveFile(removeHigh);
 
 			if (!genWeights)
 				return;
 
-			wxString removeLow = removePath + "_0.nif";
+			wxString removeLow = resolveForRemoval(removePath + "_0.nif");
 			if (wxFileName::FileExists(removeLow))
 				wxRemoveFile(removeLow);
 
@@ -4562,7 +4569,12 @@ int BodySlideApp::BuildListBodies(
 		currentDiffs.Clear();
 
 		/* Create directory for the outfit */
-		wxString dir = wxString::FromUTF8(datapath + currentSet.GetOutputPath());
+		// Matched against what is already on disk: an .osp saying "Meshes\Armor"
+		// must build into an existing "meshes/armor" instead of raising a second
+		// tree beside it that differs only in case. The file name itself keeps
+		// the spelling the set asked for.
+		const std::string outputDir = PlatformUtil::ResolveExistingPathPrefix(datapath + currentSet.GetOutputPath());
+		wxString dir = wxString::FromUTF8(outputDir);
 		bool success = ensureOutputDirectory(dir);
 
 		if (!success) {
@@ -4570,7 +4582,7 @@ int BodySlideApp::BuildListBodies(
 			return;
 		}
 
-		std::string outFileNameSmall = datapath + currentSet.GetOutputFilePath();
+		std::string outFileNameSmall = outputDir + PathSepStr + currentSet.GetOutputFile();
 		std::string outFileNameBig = outFileNameSmall;
 
 		bool triKeep = currentSet.PreventMorphFile();
