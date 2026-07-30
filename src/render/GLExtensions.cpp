@@ -6,6 +6,10 @@ See the included LICENSE file
 #include "GLExtensions.h"
 #include <string>
 
+#ifdef __linux__
+#include <wx/log.h>
+#endif
+
 bool extInitialized = false;
 bool extSupported = true;
 bool extGLISupported = true;
@@ -181,8 +185,17 @@ void InitExtensions() {
 	// code 4) with gtk3 builds of wxWidgets and fix it.  Everything still
 	// seems to work if we ignore the error, though.
 	if (err != GLEW_OK && err != GLEW_ERROR_NO_GLX_DISPLAY) {
-		fprintf(stderr, "Error (%d): %s\n", (int)err, glewGetErrorString(err));
-		abort();
+		// Don't abort: killing the process leaves the user with no window and
+		// no explanation, and this is reachable on a Wayland session where
+		// wxGLCanvas uses EGL but GLEW was built for GLX.  Degrade the way the
+		// Windows path does when wglGetProcAddress comes up empty.
+		wxString errStr = wxString::FromUTF8(reinterpret_cast<const char*>(glewGetErrorString(err)));
+		wxLogError("OpenGL: glewInit() failed with error %d: %s", (int)err, errStr);
+
+		extGLISupported = false;
+		extSupported = false;
+		extInitialized = true;
+		return;
 	}
 	extGLISupported = glTexStorage1D && glTexStorage2D && glTexStorage3D && glTexSubImage3D && glCompressedTexSubImage1D && glCompressedTexSubImage2D && glCompressedTexSubImage3D;
 	extSupported = glGetStringi && glGenVertexArrays && glBindVertexArray && glDeleteVertexArrays && glCreateShader && glShaderSource && glCompileShader && glCreateProgram
