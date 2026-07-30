@@ -18,6 +18,11 @@ namespace GameUtil {
 	/// Comparison is case-insensitive and ignores surrounding whitespace.
 	int FindTargetGame(const wxString& name);
 
+	/// Default skeleton reference and skeleton root node for a target game,
+	/// matching what the first-run setup dialog writes. Returns false for an
+	/// out-of-range index or a game with no skeleton shipped in res/.
+	bool GetDefaultSkeleton(int targ, std::string& outReference, std::string& outRootName);
+
 	/// Apply the BSOS_TARGET_GAME / BSOS_GAME_DATA_PATH / BSOS_OUTPUT_DATA_PATH
 	/// environment overrides to the configuration.
 	///

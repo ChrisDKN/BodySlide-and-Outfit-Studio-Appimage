@@ -29,6 +29,30 @@ const std::array<wxString, 10> TargetGames = {
 } // namespace GameUtil
 
 namespace {
+struct SkeletonDefault {
+	const char* reference;
+	const char* rootName;
+};
+
+// Indexed to match TargetGames above (and the TargetGame enum):
+// FO3, FONV, SKYRIM, FO4, SKYRIMSE, FO4VR, SKYRIMVR, FO76, OB, SF
+//
+// Mirrors the assignments the first-run setup dialog makes in
+// BodySlideApp::ShowSetup() / OutfitStudio::ShowSetup(). Fallout 76 is blank
+// because no skeleton for it ships in res/, matching that dialog's switch.
+const std::array<SkeletonDefault, 10> SkeletonDefaults = {{
+	{"res/skeleton_fo3nv.nif", "Bip01"},				// Fallout3
+	{"res/skeleton_fo3nv.nif", "Bip01"},				// FalloutNewVegas
+	{"res/skeleton_female_sk.nif", "NPC Root [Root]"},	// Skyrim
+	{"res/skeleton_fo4.nif", "Root"},					// Fallout4
+	{"res/skeleton_female_sse.nif", "NPC Root [Root]"}, // SkyrimSpecialEdition
+	{"res/skeleton_fo4.nif", "Root"},					// Fallout4VR
+	{"res/skeleton_female_sse.nif", "NPC Root [Root]"}, // SkyrimVR
+	{"", ""},											// Fallout76 (none shipped)
+	{"res/skeleton_ob.nif", "Bip01"},					// Oblivion
+	{"res/skeleton_female_sf.nif", "Root"},				// Starfield
+}};
+
 // Reads a directory path from the environment, trimmed and with a trailing
 // separator. Returns false when the variable is unset or empty.
 bool GetEnvDirPath(const char* name, wxString& outPath) {
@@ -63,7 +87,24 @@ int GameUtil::FindTargetGame(const wxString& name) {
 	return -1;
 }
 
+bool GameUtil::GetDefaultSkeleton(int targ, std::string& outReference, std::string& outRootName) {
+	if (targ < 0 || targ >= static_cast<int>(SkeletonDefaults.size()))
+		return false;
+
+	const SkeletonDefault& def = SkeletonDefaults[targ];
+	if (def.reference[0] == '\0')
+		return false;
+
+	outReference = def.reference;
+	outRootName = def.rootName;
+	return true;
+}
+
 void GameUtil::ApplyEnvironmentOverrides() {
+	// Read before anything is overwritten, so we can tell an actual game change
+	// from a launch that merely restates the game already configured.
+	const int previousGame = Config.GetIntValue("TargetGame", -1);
+
 	int targetGame = -1;
 
 	wxString envGame;
@@ -83,6 +124,22 @@ void GameUtil::ApplyEnvironmentOverrides() {
 		if (targetGame >= 0) {
 			Config.SetValue("TargetGame", targetGame);
 			wxLogMessage("BSOS_TARGET_GAME: selected %s.", GameUtil::TargetGames[targetGame]);
+
+			// The skeleton reference is normally written by the first-run setup
+			// dialog, which only runs when TargetGame is unset -- and setting the
+			// game here means it never will. Left empty, OutfitProject falls back
+			// to AppDir + "" and reports "Failed to load skeleton '<data dir>/'".
+			//
+			// Only fill it in when the game actually changed or nothing is set, so
+			// that a skeleton the user picked by hand for this same game survives.
+			std::string skeletonRef;
+			std::string skeletonRoot;
+			if ((targetGame != previousGame || Config["Anim/DefaultSkeletonReference"].empty())
+				&& GameUtil::GetDefaultSkeleton(targetGame, skeletonRef, skeletonRoot)) {
+				Config.SetValue("Anim/DefaultSkeletonReference", skeletonRef);
+				Config.SetValue("Anim/SkeletonRootName", skeletonRoot);
+				wxLogMessage("Default skeleton set to %s (root '%s').", skeletonRef, skeletonRoot);
+			}
 		}
 		else {
 			// Picking a wrong game silently would load the wrong skeleton and
