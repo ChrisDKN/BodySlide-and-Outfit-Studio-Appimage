@@ -71,20 +71,9 @@ RefTemplateFile::RefTemplateFile(const std::string& srcFileName) {
 void RefTemplateFile::Open(const std::string& srcFileName) {
 	fileName = srcFileName;
 
-	FILE* fp = nullptr;
-
-#ifdef _WINDOWS
-	std::wstring winFileName = PlatformUtil::MultiByteToWideUTF8(srcFileName);
-	error = _wfopen_s(&fp, winFileName.c_str(), L"rb");
-	if (error || !fp)
+	FILE* fp = PlatformUtil::OpenFile(srcFileName, "rb", error);
+	if (!fp)
 		return;
-#else
-	fp = fopen(srcFileName.c_str(), "rb");
-	if (!fp) {
-		error = errno;
-		return;
-	}
-#endif
 
 	error = doc.LoadFile(fp);
 	fclose(fp);

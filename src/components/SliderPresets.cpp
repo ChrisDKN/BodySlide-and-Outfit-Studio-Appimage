@@ -139,18 +139,10 @@ bool PresetCollection::LoadPresets(const std::string& basePath, const std::strin
 	wxDir::GetAllFiles(path, &files, "*.xml");
 
 	for (auto& file : files) {
-		FILE* fp = nullptr;
-
-#ifdef _WINDOWS
-		std::wstring winFileName = PlatformUtil::MultiByteToWideUTF8(file.ToUTF8().data());
-		int ret = _wfopen_s(&fp, winFileName.c_str(), L"rb");
-		if (ret || !fp)
-			continue;
-#else
-		fp = fopen(file.ToUTF8().data(), "rb");
+		int ret = 0;
+		FILE* fp = PlatformUtil::OpenFile(file.ToUTF8().data(), "rb", ret);
 		if (!fp)
 			continue;
-#endif
 
 		int ret2 = doc.LoadFile(fp);
 		fclose(fp);
@@ -248,18 +240,10 @@ int PresetCollection::SavePreset(const std::string& filePath, const std::string&
 	XMLElement* presetElem = nullptr;
 
 	bool loaded = false;
-	FILE* fp = nullptr;
-
-#ifdef _WINDOWS
-	std::wstring winFileName = PlatformUtil::MultiByteToWideUTF8(filePath);
-	int ret = _wfopen_s(&fp, winFileName.c_str(), L"rb");
-	if (ret == 0 && fp)
-		loaded = true;
-#else
-	fp = fopen(filePath.c_str(), "rb");
+	int ret = 0;
+	FILE* fp = PlatformUtil::OpenFile(filePath, "rb", ret);
 	if (fp)
 		loaded = true;
-#endif
 
 	if (loaded) {
 		int retDoc = outDoc.LoadFile(fp);
@@ -348,18 +332,10 @@ int PresetCollection::SavePreset(const std::string& filePath, const std::string&
 }
 
 int PresetCollection::DeletePreset(const std::string& filePath, const std::string& presetName) {
-	FILE* fp = nullptr;
-
-#ifdef _WINDOWS
-	std::wstring winFileName = PlatformUtil::MultiByteToWideUTF8(filePath);
-	int ret = _wfopen_s(&fp, winFileName.c_str(), L"rb");
-	if (ret || !fp)
-		return -1;
-#else
-	fp = fopen(filePath.c_str(), "rb");
+	int ret = 0;
+	FILE* fp = PlatformUtil::OpenFile(filePath, "rb", ret);
 	if (!fp)
 		return -1;
-#endif
 
 	XMLDocument doc;
 	int ret2 = doc.LoadFile(fp);

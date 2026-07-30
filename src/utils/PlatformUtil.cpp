@@ -5,6 +5,8 @@ See the included LICENSE file
 
 #include "PlatformUtil.h"
 
+#include <cerrno>
+
 #ifndef _WINDOWS
 	#include <algorithm>
 	#include <cctype>
@@ -65,6 +67,15 @@ std::string MatchEntryIgnoringCase(const std::string& dir, const std::string& wa
 	return match == cached->second.end() ? std::string() : match->second;
 }
 #endif
+
+// True for any fopen() mode that can create or modify the file.
+bool IsWriteMode(const char* mode) {
+	for (const char* m = mode; m && *m; ++m)
+		if (*m == 'w' || *m == 'a' || *m == '+')
+			return true;
+
+	return false;
+}
 
 std::string backslash_to_slash(const std::string& s) {
 	std::string sc(s);
@@ -180,6 +191,41 @@ bool FileExists(const std::string& fileName) {
 		return false;
 
 	return true;
+}
+
+FILE* OpenFile(const std::string& fileName, const char* mode, int& error) {
+	error = 0;
+
+#ifdef _WINDOWS
+	FILE* fp = nullptr;
+	error = _wfopen_s(&fp, MultiByteToWideUTF8(fileName).c_str(), MultiByteToWideUTF8(mode).c_str());
+	if (error || !fp) {
+		if (!error)
+			error = errno;
+
+		return nullptr;
+	}
+
+	return fp;
+#else
+	const std::string name = backslash_to_slash(fileName);
+	if (FILE* fp = fopen(name.c_str(), mode))
+		return fp;
+
+	// Same rule as OpenFileStream: only reads are retried with the case
+	// corrected, so creating a file never lands on an existing entry that
+	// merely resembles the requested name.
+	if (!IsWriteMode(mode)) {
+		const std::string resolved = ResolveCaseInsensitivePath(name);
+		if (resolved != name) {
+			if (FILE* fp = fopen(resolved.c_str(), mode))
+				return fp;
+		}
+	}
+
+	error = errno;
+	return nullptr;
+#endif
 }
 
 // Provide std::wstring function for Windows

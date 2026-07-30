@@ -11,6 +11,7 @@ See the included LICENSE file
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <string>
 
@@ -41,6 +42,15 @@ std::string ResolveCaseInsensitivePath(const std::string& path);
 /// file must use the name the caller chose.
 void OpenFileStream(std::fstream& file, const std::string& fileName, std::ios_base::openmode mode);
 bool FileExists(const std::string& fileName);
+
+/// fopen() counterpart to OpenFileStream(), for the tinyxml2 call sites that
+/// need a FILE*. Uses the wide-character CRT entry point on Windows so UTF-8
+/// paths survive, and on a case-sensitive filesystem retries a failed *read*
+/// once via ResolveCaseInsensitivePath(). Writes are never redirected.
+///
+/// Returns nullptr on failure, with `error` set to the platform error code
+/// (0 on success).
+FILE* OpenFile(const std::string& fileName, const char* mode, int& error);
 
 // Provide std::wstring function for Windows
 #ifdef _WINDOWS

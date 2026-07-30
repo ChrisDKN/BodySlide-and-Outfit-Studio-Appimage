@@ -285,20 +285,9 @@ void ConfigurationManager::Clear() {
 
 int ConfigurationManager::LoadConfig(const std::string& pathToFile, const std::string& rootElement) {
 	int error = 0;
-	FILE* fp = nullptr;
-
-#ifdef _WINDOWS
-	std::wstring winFileName = PlatformUtil::MultiByteToWideUTF8(pathToFile);
-	error = _wfopen_s(&fp, winFileName.c_str(), L"rb");
-	if (error || !fp)
+	FILE* fp = PlatformUtil::OpenFile(pathToFile, "rb", error);
+	if (!fp)
 		return 1;
-#else
-	fp = fopen(pathToFile.c_str(), "rb");
-	if (!fp) {
-		error = errno;
-		return 1;
-	}
-#endif
 
 	XMLDocument doc;
 	error = doc.LoadFile(fp);

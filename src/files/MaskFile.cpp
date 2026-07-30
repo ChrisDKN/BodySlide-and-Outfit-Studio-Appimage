@@ -41,18 +41,10 @@ static void LoadMaskDataElement(XMLElement* maskDataElem, MaskEntry& entry) {
 
 int MaskFile::Load(const std::string& fileName) {
 	XMLDocument doc;
-	FILE* fp = nullptr;
-
-#ifdef _WINDOWS
-	std::wstring winFileName = PlatformUtil::MultiByteToWideUTF8(fileName);
-	int err = _wfopen_s(&fp, winFileName.c_str(), L"rb");
-	if (err || !fp)
-		return 1;
-#else
-	fp = fopen(fileName.c_str(), "rb");
+	int err = 0;
+	FILE* fp = PlatformUtil::OpenFile(fileName, "rb", err);
 	if (!fp)
 		return 1;
-#endif
 
 	XMLError error = doc.LoadFile(fp);
 	fclose(fp);
