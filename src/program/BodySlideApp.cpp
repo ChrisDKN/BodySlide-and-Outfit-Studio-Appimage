@@ -136,7 +136,7 @@ bool BodySlideApp::OnInit() {
 #ifdef _DEBUG
 	std::string dataDir{wxGetCwd().ToUTF8()};
 #else
-	std::string dataDir{wxFileName(wxStandardPaths::Get().GetExecutablePath()).GetPath().ToUTF8()};
+	std::string dataDir{ProjectUtil::GetDataDir()};
 #endif
 
 	Config.LoadConfig(dataDir + "/Config.xml");
@@ -1285,7 +1285,16 @@ void BodySlideApp::LaunchOutfitStudio(const wxString& args) {
 	const wxString osExec = "OutfitStudio";
 #endif
 
-	wxString osExecCmd = wxString::Format("\"%s\\%s\" %s", wxString::FromUTF8(Config["AppDir"]), osExec, args);
+	// Resolve against the directory holding the binaries, not Config["AppDir"]:
+	// the data directory can be relocated (BSOS_APPDIR) and then contains no
+	// executables at all. BSOS_BINDIR lets a portable bundle point at its own
+	// launcher directory instead of the raw executable directory, so that the
+	// child is started through the same wrapper that set up the environment.
+	wxString binDir;
+	if (!wxGetEnv("BSOS_BINDIR", &binDir) || binDir.IsEmpty())
+		binDir = wxString::FromUTF8(ProjectUtil::GetExeDir());
+
+	wxString osExecCmd = wxString::Format("\"%s\" %s", wxFileName(binDir, osExec).GetFullPath(), args);
 
 	if (!wxExecute(osExecCmd, wxEXEC_ASYNC)) {
 		wxLogError("Failed to execute '%s' process.", osExecCmd);

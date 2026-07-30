@@ -1,0 +1,202 @@
+name: Linux Release
+
+# Publishes the portable Linux binaries that external tools (e.g. Amethyst Mod
+# Manager) download. Pushing a v* tag creates a GitHub Release with the assets
+# attached; workflow_dispatch builds the same artifacts for testing and only
+# publishes when explicitly asked to.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version string for the artifact names (defaults to git describe)'
+        required: false
+        type: string
+      publish:
+        description: 'Create a GitHub Release from this build'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  linux-portable:
+    name: Linux portable (AppImage + tarball)
+    runs-on: ubuntu-latest
+    # Built on bleeding-edge Arch on purpose: sharun bundles the loader and
+    # glibc with the app, so the host glibc of the build machine does not
+    # become the compatibility floor the way it would for a plain dynamic
+    # build. The resulting artifacts run on SteamOS, Arch, Debian, Fedora and
+    # Ubuntu alike without installing wxwidgets or glew.
+    container: ghcr.io/pkgforge-dev/archlinux:latest
+
+    steps:
+      # anylinux-setup-action fetches its helper scripts with a wget invocation
+      # that does not retry on HTTP errors, so a transient 429 from GitHub's raw
+      # host kills the build. Fetch them here behind a real retry loop instead
+      # and inline the rest of that action's setup below.
+      - name: Pre-fetch anylinux tools (429-resilient)
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v curl >/dev/null 2>&1 || pacman -Sy --noconfirm curl
+          base="https://raw.githubusercontent.com/pkgforge-dev/Anylinux-AppImages/refs/heads/main/useful-tools"
+          dir="$RUNNER_TEMP/anylinux-tools"
+          mkdir -p "$dir"
+          fetch() {
+            local url="$1" dest="$2" attempt
+            for attempt in 1 2 3 4 5; do
+              if curl -fsSL -o "$dest" "$url"; then
+                return 0
+              fi
+              echo "attempt $attempt failed for $url; retrying..." >&2
+              sleep $((attempt * 15))
+            done
+            echo "ERROR: could not fetch $url after retries" >&2
+            return 1
+          }
+          fetch "$base/quick-sharun.sh"       "$dir/quick-sharun.sh"
+          fetch "$base/get-debloated-pkgs.sh" "$dir/get-debloated-pkgs.sh"
+          install -Dm755 "$dir/quick-sharun.sh"       /usr/local/bin/quick-sharun
+          install -Dm755 "$dir/get-debloated-pkgs.sh" /usr/local/bin/get-debloated-pkgs
+
+      # Runs before actions/checkout so that git is present: without it checkout
+      # falls back to downloading a source tarball, which cannot fetch the
+      # lib/nifly submodule.
+      - name: Prepare container
+        shell: bash
+        run: |
+          set -euo pipefail
+          pacman-key --init
+          pacman -Syy --noconfirm archlinux-keyring
+          pacman -Syu --noconfirm \
+              base-devel \
+              cmake \
+              directx-headers \
+              git \
+              github-cli \
+              glew \
+              jq \
+              libglvnd \
+              mesa \
+              ninja \
+              patchelf \
+              unzip \
+              wget \
+              wxwidgets-gtk3 \
+              xorg-server-xvfb \
+              zstd \
+              zsync
+
+      - name: Install debloated packages
+        shell: bash
+        run: |
+          # Slimmed rebuilds of two large transitive dependencies of
+          # wxwidgets-gtk3. Each provides/replaces the stock package, so the
+          # bundle shrinks without changing what gets linked.
+          get-debloated-pkgs icu-mini libxml2-mini
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 0   # git describe needs tags for the fallback version
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        # Passed through the environment rather than interpolated into the
+        # script body: workflow_dispatch inputs are attacker-controllable text.
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # Trust the tag when there is one; the manual input is for test builds.
+          if [ "${GITHUB_REF_TYPE:-}" = tag ]; then
+            version="${GITHUB_REF_NAME#v}"
+          elif [ -n "${INPUT_VERSION:-}" ]; then
+            version="${INPUT_VERSION#v}"
+          else
+            git config --global --add safe.directory "$GITHUB_WORKSPACE"
+            version="$(git describe --tags --always 2>/dev/null || echo 0.0.0)"
+            version="${version#v}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building version: $version"
+
+      - name: Build AppImage and tarball
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: bash .github/appimage/make-appimage.sh
+
+      - name: Smoke test AppImage
+        shell: bash
+        run: quick-sharun --test .github/appimage/dist/*.AppImage
+
+      # Extract the tarball somewhere unrelated to the build tree and start it,
+      # to prove the sharun tree really is relocatable and that the launcher
+      # resolves its own root correctly.
+      - name: Smoke test tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest="$RUNNER_TEMP/tarball-test"
+          mkdir -p "$dest"
+          tar --zstd -C "$dest" -xf .github/appimage/dist/*.tar.zst
+          root="$(find "$dest" -maxdepth 1 -mindepth 1 -type d | head -1)"
+          test -x "$root/BodySlide"
+          test -x "$root/OutfitStudio"
+          test -d "$root/res/xrc"
+          test -f "$root/Config.xml"
+          xvfb-run -a -- timeout 20 "$root/BodySlide" || status=$?
+          # timeout kills the GUI after 20s (124); anything else is a real crash.
+          if [ "${status:-0}" -ne 0 ] && [ "${status:-0}" -ne 124 ]; then
+            echo "ERROR: BodySlide exited with status ${status}" >&2
+            exit 1
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-portable
+          path: .github/appimage/dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag' || inputs.publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          if [ "${GITHUB_REF_TYPE:-}" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="v${VERSION}"
+          fi
+
+          # Reuse an existing release (the Windows job may have created it, or
+          # this is a re-run) instead of failing on the second create.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; uploading assets to it."
+          else
+            # --target pins the release (and the tag, when publishing manually
+            # from a branch) to the exact commit these artifacts were built from.
+            gh release create "$tag" \
+              --title "$tag" \
+              --target "$GITHUB_SHA" \
+              --generate-notes
+          fi
+
+          gh release upload "$tag" .github/appimage/dist/* --clobber

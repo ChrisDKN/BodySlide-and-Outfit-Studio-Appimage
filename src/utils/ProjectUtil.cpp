@@ -8,8 +8,28 @@ See the included LICENSE file
 #include "StringStuff.h"
 
 #include <wx/dir.h>
+#include <wx/filename.h>
+#include <wx/stdpaths.h>
+#include <wx/utils.h>
 
 extern ConfigurationManager Config;
+
+std::string ProjectUtil::GetExeDir() {
+	return std::string(wxFileName(wxStandardPaths::Get().GetExecutablePath()).GetPath().ToUTF8());
+}
+
+std::string ProjectUtil::GetDataDir() {
+	wxString envDir;
+	if (wxGetEnv("BSOS_APPDIR", &envDir) && !envDir.IsEmpty()) {
+		// Strip any trailing separator so callers can keep appending "/name".
+		while (envDir.length() > 1 && (envDir.Last() == '/' || envDir.Last() == wxFileName::GetPathSeparator()))
+			envDir.RemoveLast();
+
+		return std::string(envDir.ToUTF8());
+	}
+
+	return GetExeDir();
+}
 
 std::string ProjectUtil::GetProjectPath() {
 	std::string projectPath = Config["ProjectPath"];

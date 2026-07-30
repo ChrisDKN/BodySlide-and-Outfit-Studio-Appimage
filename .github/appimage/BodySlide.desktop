@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=BodySlide and Outfit Studio
+GenericName=Outfit and Body Editor
+Comment=Convert, create and customize outfits and bodies for Bethesda games
+Exec=BodySlide
+Icon=BodySlide
+Terminal=false
+Categories=Graphics;3DGraphics;Game;
+Keywords=Skyrim;Fallout;Bethesda;Nif;Outfit;Mod;
+Actions=OutfitStudio;
+
+[Desktop Action OutfitStudio]
+Name=Outfit Studio
+Exec=BodySlide --outfit-studio
+Icon=BodySlide
