@@ -727,6 +727,8 @@ private:
 	void OnRightUp(wxMouseEvent& event);
 
 	void OnKeys(wxKeyEvent& event);
+	void OnKeyUp(wxKeyEvent& event);
+	void OnKillFocus(wxFocusEvent& event);
 	void OnIdle(wxIdleEvent& event);
 
 	void OnCaptureLost(wxMouseCaptureLostEvent& event);
@@ -769,6 +771,11 @@ private:
 	OutfitStudioFrame* os = nullptr;
 
 	float brushSize = 0.45f;
+
+	// Whether S is held for the scroll-to-resize-brush shortcut. Tracked from key
+	// events rather than queried with wxGetKeyState(), which is unreliable for
+	// non-modifier keys on wxGTK and does nothing at all under Wayland.
+	bool brushResizeKeyDown = false;
 
 	bool editMode = false;
 	bool brushMode = false;

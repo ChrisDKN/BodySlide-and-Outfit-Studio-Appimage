@@ -13734,6 +13734,8 @@ wxBEGIN_EVENT_TABLE(wxGLPanel, wxGLCanvas)
 	EVT_RIGHT_DOWN(wxGLPanel::OnRightDown)
 	EVT_RIGHT_UP(wxGLPanel::OnRightUp)
 	EVT_CHAR_HOOK(wxGLPanel::OnKeys)
+	EVT_KEY_UP(wxGLPanel::OnKeyUp)
+	EVT_KILL_FOCUS(wxGLPanel::OnKillFocus)
 	EVT_IDLE(wxGLPanel::OnIdle)
 	EVT_MOUSE_CAPTURE_LOST(wxGLPanel::OnCaptureLost)
 wxEND_EVENT_TABLE()
@@ -14025,6 +14027,12 @@ void wxGLPanel::SetLastTool(ToolID tool) {
 }
 
 void wxGLPanel::OnKeys(wxKeyEvent& event) {
+	// Held-key state for the scroll-to-resize-brush shortcut. Auto-repeat keeps
+	// this set while S is down, and any other key clears it, which together with
+	// OnKeyUp() and OnKillFocus() keeps it from latching on: a stuck flag would
+	// cost the user camera dolly, which is worse than losing the shortcut.
+	brushResizeKeyDown = (event.GetUnicodeKey() == 'S' && !event.HasAnyModifiers());
+
 	if (!event.HasAnyModifiers()) {
 		if (event.GetUnicodeKey() == 'V') {
 			wxPoint cursorPos(event.GetPosition());
@@ -16704,6 +16712,20 @@ void wxGLPanel::ShowVertexEdit(bool show) {
 	}
 }
 
+void wxGLPanel::OnKeyUp(wxKeyEvent& event) {
+	if (event.GetUnicodeKey() == 'S')
+		brushResizeKeyDown = false;
+
+	event.Skip();
+}
+
+void wxGLPanel::OnKillFocus(wxFocusEvent& event) {
+	// The key release goes to whoever has focus, so a shortcut still held when
+	// focus moves away would otherwise never be cleared.
+	brushResizeKeyDown = false;
+	event.Skip();
+}
+
 void wxGLPanel::OnIdle(wxIdleEvent& WXUNUSED(event)) {
 	if (wxGetKeyState(wxKeyCode::WXK_SHIFT) || wxGetKeyState(wxKeyCode::WXK_CONTROL) || wxGetKeyState(wxKeyCode::WXK_ALT) || lbuttonDown || rbuttonDown || mbuttonDown)
 		return;
@@ -16773,7 +16795,7 @@ void wxGLPanel::OnMouseWheel(wxMouseEvent& event) {
 			}
 		}
 	}
-	else if (wxGetKeyState(wxKeyCode('S'))) {
+	else if (brushResizeKeyDown) {
 		wxPoint p = event.GetPosition();
 
 		if (brushMode) {
