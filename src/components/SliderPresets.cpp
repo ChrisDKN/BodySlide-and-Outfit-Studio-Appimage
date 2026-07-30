@@ -4,6 +4,7 @@ See the included LICENSE file
 */
 
 #include "SliderPresets.h"
+#include "../utils/FileSearchUtil.h"
 #include "../utils/PlatformUtil.h"
 #include "../utils/StringStuff.h"
 
@@ -136,7 +137,7 @@ bool PresetCollection::LoadPresets(const std::string& basePath, const std::strin
 
 	wxArrayString files;
 	wxString path = wxString::FromUTF8(basePath);
-	wxDir::GetAllFiles(path, &files, "*.xml");
+	FileSearchUtil::GetFilesByExtension(path, files, "xml");
 
 	for (auto& file : files) {
 		int ret = 0;

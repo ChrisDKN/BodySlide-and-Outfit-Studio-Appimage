@@ -35,6 +35,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "SliderDataImportDialog.h"
 #include "AutomationDialog.h"
 #include "../components/ClippingFixer.h"
+#include "../utils/FileSearchUtil.h"
 #include "../utils/ProjectUtil.h"
 #include "../utils/GameUtil.h"
 #include "../utils/StackTrace.h"
@@ -1770,8 +1771,8 @@ void OutfitStudioFrame::OnPackProjects(wxCommandEvent& WXUNUSED(event)) {
 
 		wxArrayString files;
 		const wxString sliderSetsDir = wxString::FromUTF8(ProjectUtil::GetProjectSubPath("SliderSets"));
-		wxDir::GetAllFiles(sliderSetsDir, &files, "*.osp");
-		wxDir::GetAllFiles(sliderSetsDir, &files, "*.xml");
+		FileSearchUtil::GetFilesByExtension(sliderSetsDir, files, "osp");
+		FileSearchUtil::GetFilesByExtension(sliderSetsDir, files, "xml");
 
 		for (auto& file : files) {
 			std::string fileName{file.ToUTF8()};
@@ -2206,8 +2207,8 @@ void OutfitStudioFrame::SettingsFillDataFiles(wxCheckListBox* dataFileList, wxSt
 	}
 
 	wxArrayString files;
-	wxDir::GetAllFiles(dataDir, &files, "*.ba2", wxDIR_FILES);
-	wxDir::GetAllFiles(dataDir, &files, "*.bsa", wxDIR_FILES);
+	FileSearchUtil::GetFilesByExtension(dataDir, files, "ba2", wxDIR_FILES);
+	FileSearchUtil::GetFilesByExtension(dataDir, files, "bsa", wxDIR_FILES);
 	for (auto& file : files) {
 		file = file.AfterLast('/').AfterLast('\\');
 		dataFileList->Insert(file, dataFileList->GetCount());

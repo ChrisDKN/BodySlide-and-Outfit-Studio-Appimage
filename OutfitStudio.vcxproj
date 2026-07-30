@@ -867,6 +867,7 @@
     <ClInclude Include="src\utils\Log.h" />
     <ClInclude Include="src\utils\PlatformUtil.h" />
     <ClInclude Include="src\utils\SettingsDialogShared.h" />
+    <ClInclude Include="src\utils\FileSearchUtil.h" />
     <ClInclude Include="src\utils\ProjectUtil.h" />
     <ClInclude Include="src\utils\GameUtil.h" />
     <ClInclude Include="src\utils\StackTrace.h" />
@@ -966,6 +967,7 @@
     <ClCompile Include="src\utils\Log.cpp" />
     <ClCompile Include="src\utils\PlatformUtil.cpp" />
     <ClCompile Include="src\utils\SettingsDialogShared.cpp" />
+    <ClCompile Include="src\utils\FileSearchUtil.cpp" />
     <ClCompile Include="src\utils\ProjectUtil.cpp" />
     <ClCompile Include="src\utils\GameUtil.cpp" />
     <ClCompile Include="src\utils\StackTrace.cpp" />

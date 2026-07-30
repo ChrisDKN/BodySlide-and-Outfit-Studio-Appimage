@@ -286,6 +286,7 @@ set(BSOS_COMMON_SOURCES
 	src/ui/wxStateButton.cpp
 	src/utils/AABBTree.cpp
 	src/utils/ConfigurationManager.cpp
+	src/utils/FileSearchUtil.cpp
 	src/utils/Log.cpp
 	src/utils/PlatformUtil.cpp
 	src/utils/SettingsDialogShared.cpp

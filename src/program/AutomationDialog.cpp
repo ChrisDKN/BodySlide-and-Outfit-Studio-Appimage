@@ -10,6 +10,7 @@ See the included LICENSE file
 #include "PartitionTypeChoices.h"
 
 #include "../files/MaskFile.h"
+#include "../utils/FileSearchUtil.h"
 #include "../utils/ProjectUtil.h"
 
 #include <NifFile.hpp>
@@ -2344,10 +2345,10 @@ int AutomationDialog::RunHeadless(const wxString& scriptName, const wxArrayStrin
 		}
 		else {
 			// Resolve set project names against <ProjectPath>/SliderSets/*.{osp,xml}.
-			std::string projPath = ProjectUtil::GetProjectPath();
+			const wxString sliderSetsDir = wxString::FromUTF8(ProjectUtil::GetProjectSubPath("SliderSets"));
 			wxArrayString files;
-			wxDir::GetAllFiles(wxString::FromUTF8(projPath) + "/SliderSets", &files, "*.osp");
-			wxDir::GetAllFiles(wxString::FromUTF8(projPath) + "/SliderSets", &files, "*.xml");
+			FileSearchUtil::GetFilesByExtension(sliderSetsDir, files, "osp");
+			FileSearchUtil::GetFilesByExtension(sliderSetsDir, files, "xml");
 
 			std::set<std::string> wanted;
 			for (const auto& s : batchInputs)

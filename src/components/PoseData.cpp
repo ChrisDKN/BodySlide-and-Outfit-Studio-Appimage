@@ -5,6 +5,7 @@ See the included LICENSE file
 
 #include "PoseData.h"
 #include "Anim.h"
+#include "../utils/FileSearchUtil.h"
 #include "../utils/PlatformUtil.h"
 
 #include <wx/filename.h>
@@ -57,7 +58,7 @@ int PoseDataCollection::LoadData(const std::string& basePath) {
 	poseData.clear();
 
 	wxArrayString files;
-	wxDir::GetAllFiles(basePath, &files, "*.xml");
+	FileSearchUtil::GetFilesByExtension(basePath, files, "xml");
 
 	for (auto& file : files) {
 		PoseDataFile poseDataFile(file.ToUTF8().data());

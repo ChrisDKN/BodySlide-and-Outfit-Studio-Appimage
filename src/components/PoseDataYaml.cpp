@@ -4,6 +4,7 @@ See the included LICENSE file
 */
 
 #include "PoseData.h"
+#include "../utils/FileSearchUtil.h"
 #include "../utils/PlatformUtil.h"
 
 #include <wx/filename.h>
@@ -229,8 +230,8 @@ int PoseDataCollection::LoadYamlData(const std::string& basePath, const std::str
 		return 0;
 
 	wxArrayString files;
-	wxDir::GetAllFiles(wxBase, &files, "*.yaml", wxDIR_FILES);
-	wxDir::GetAllFiles(wxBase, &files, "*.yml", wxDIR_FILES);
+	FileSearchUtil::GetFilesByExtension(wxBase, files, "yaml", wxDIR_FILES);
+	FileSearchUtil::GetFilesByExtension(wxBase, files, "yml", wxDIR_FILES);
 
 	int loaded = 0;
 	for (auto& file : files) {

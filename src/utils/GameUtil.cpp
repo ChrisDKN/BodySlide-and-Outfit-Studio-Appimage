@@ -5,6 +5,7 @@ See the included LICENSE file
 
 #include "GameUtil.h"
 #include "ConfigurationManager.h"
+#include "FileSearchUtil.h"
 #include "StringStuff.h"
 #include "../../lib/FSEngine/FSManager.h"
 
@@ -226,8 +227,8 @@ void GameUtil::GetArchiveFiles(std::vector<std::string>& outList) {
 
 	wxString dataDir = Config["GameDataPath"];
 	wxArrayString files;
-	wxDir::GetAllFiles(dataDir, &files, "*.ba2", wxDIR_FILES);
-	wxDir::GetAllFiles(dataDir, &files, "*.bsa", wxDIR_FILES);
+	FileSearchUtil::GetFilesByExtension(dataDir, files, "ba2", wxDIR_FILES);
+	FileSearchUtil::GetFilesByExtension(dataDir, files, "bsa", wxDIR_FILES);
 	for (auto& f : files) {
 		f = f.AfterLast('/').AfterLast('\\');
 		if (fsearch.find(f.Lower()) == fsearch.end())

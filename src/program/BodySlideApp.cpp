@@ -25,6 +25,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "../utils/ParallelFor.h"
 #include "../utils/StackTrace.h"
 #include "../utils/StringStuff.h"
+#include "../utils/FileSearchUtil.h"
 #include "../utils/ProjectUtil.h"
 #include "../utils/GameUtil.h"
 #include "../utils/GtkChoiceUtil.h"
@@ -781,8 +782,10 @@ int BodySlideApp::LoadSliderSets() {
 
 	wxArrayString files;
 	const wxString sliderSetsDir = wxString::FromUTF8(ProjectUtil::GetProjectSubPath("SliderSets"));
-	wxDir::GetAllFiles(sliderSetsDir, &files, "*.osp");
-	wxDir::GetAllFiles(sliderSetsDir, &files, "*.xml");
+	// Once per extension: the loop below keeps the first definition of an
+	// outfit name it sees, so every .osp has to be considered before any .xml.
+	FileSearchUtil::GetFilesByExtension(sliderSetsDir, files, "osp");
+	FileSearchUtil::GetFilesByExtension(sliderSetsDir, files, "xml");
 
 	bool filterHasZaps = false;
 
@@ -6541,8 +6544,8 @@ void BodySlideFrame::SettingsFillDataFiles(wxCheckListBox* dataFileList, wxStrin
 	}
 
 	wxArrayString files;
-	wxDir::GetAllFiles(dataDir, &files, "*.ba2", wxDIR_FILES);
-	wxDir::GetAllFiles(dataDir, &files, "*.bsa", wxDIR_FILES);
+	FileSearchUtil::GetFilesByExtension(dataDir, files, "ba2", wxDIR_FILES);
+	FileSearchUtil::GetFilesByExtension(dataDir, files, "bsa", wxDIR_FILES);
 	for (auto& file : files) {
 		file = file.AfterLast('/').AfterLast('\\');
 		dataFileList->Insert(file, dataFileList->GetCount());
