@@ -16757,10 +16757,29 @@ void wxGLPanel::OnSize(wxSizeEvent& event) {
 	gls.RenderOneFrame();
 }
 
+int wxGLPanel::ConsumeWheelSteps(const wxMouseEvent& event) {
+	// A traditional wheel reports one notch of GetWheelDelta() per event, but
+	// touchpads and high-resolution wheels report many smaller deltas across a
+	// gesture. Acting once per event would run through dozens of items in a
+	// single swipe, so rotation is banked until it is worth a whole notch.
+	const int notch = event.GetWheelDelta() > 0 ? event.GetWheelDelta() : 120;
+
+	wheelAccumulator += event.GetWheelRotation();
+	const int steps = wheelAccumulator / notch;
+	wheelAccumulator -= steps * notch;
+	return steps;
+}
+
 void wxGLPanel::OnMouseWheel(wxMouseEvent& event) {
 	int delt = event.GetWheelRotation();
 
 	if (event.ControlDown()) {
+		const int steps = ConsumeWheelSteps(event);
+		if (steps == 0)
+			return;
+
+		delt = steps;
+
 		std::string sliderName = os->lastActiveSlider;
 
 		if (sliderName.empty())
@@ -16799,8 +16818,12 @@ void wxGLPanel::OnMouseWheel(wxMouseEvent& event) {
 		wxPoint p = event.GetPosition();
 
 		if (brushMode) {
+			const int steps = ConsumeWheelSteps(event);
+			if (steps == 0)
+				return;
+
 			// Adjust brush size
-			if (delt < 0)
+			if (steps < 0)
 				DecBrush();
 			else
 				IncBrush();
@@ -16812,6 +16835,10 @@ void wxGLPanel::OnMouseWheel(wxMouseEvent& event) {
 		}
 	}
 	else {
+		// The camera dolly is continuous rather than stepped, so it uses the raw
+		// rotation: a smooth-scrolling device reporting smaller deltas should
+		// move the camera proportionally less, which is the behaviour wanted.
+		wheelAccumulator = 0;
 		gls.DollyCamera(delt);
 		UpdateTransformTool();
 		UpdatePivot();

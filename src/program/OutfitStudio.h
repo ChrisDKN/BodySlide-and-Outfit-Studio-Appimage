@@ -731,6 +731,10 @@ private:
 	void OnKillFocus(wxFocusEvent& event);
 	void OnIdle(wxIdleEvent& event);
 
+	/// Whole wheel notches available from the accumulated rotation, consuming
+	/// them. For the shortcuts that step through a list one item at a time.
+	int ConsumeWheelSteps(const wxMouseEvent& event);
+
 	void OnCaptureLost(wxMouseCaptureLostEvent& event);
 
 	std::unique_ptr<wxGLContext> context;
@@ -776,6 +780,9 @@ private:
 	// events rather than queried with wxGetKeyState(), which is unreliable for
 	// non-modifier keys on wxGTK and does nothing at all under Wayland.
 	bool brushResizeKeyDown = false;
+
+	// Leftover wheel rotation not yet worth a step. See ConsumeWheelSteps().
+	int wheelAccumulator = 0;
 
 	bool editMode = false;
 	bool brushMode = false;
