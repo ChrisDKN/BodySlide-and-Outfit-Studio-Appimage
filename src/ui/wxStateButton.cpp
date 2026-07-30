@@ -30,35 +30,14 @@ wxStateButton::wxStateButton(wxWindow* parent,
 }
 
 /*
- * Called by the system of by wxWidgets when the panel needs
- * to be redrawn. You can also trigger this call by
- * calling Refresh()/Update().
+ * Called by the system or by wxWidgets when the button needs to be redrawn.
+ * Trigger it by calling Refresh(), which is what the state setters below do.
  */
 void wxStateButton::paintEvent(wxPaintEvent& WXUNUSED(evt)) {
-	// Depending on your system you may need to look at double-buffered dcs
 	wxPaintDC dc(this);
 	render(dc);
 }
 
-/*
- * Alternatively, you can use a clientDC to paint on the panel
- * at any time. Using this generally does not free you from
- * catching paint events, since it is possible that e.g. the window
- * manager throws away your drawing when the window comes to the
- * background, and expects you will redraw it when the window comes
- * back (by sending a paint event).
- */
-void wxStateButton::paintNow() {
-	// Depending on your system you may need to look at double-buffered dcs
-	wxClientDC dc(this);
-	render(dc);
-}
-
-/*
- * Here we do the actual rendering. I put it in a separate
- * method so that it can work no matter what type of DC
- * (e.g. wxPaintDC or wxClientDC) is used.
- */
 void wxStateButton::render(wxDC& dc) {
 	int w;
 	int h;

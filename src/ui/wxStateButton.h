@@ -26,8 +26,10 @@ public:
 				  const bool noState = false);
 
 	void paintEvent(wxPaintEvent& evt);
-	void paintNow();
 
+	/// Draws the button. Only ever called from the paint handler: drawing
+	/// through a wxClientDC outside a paint event is unsupported on GTK3 and
+	/// Wayland, where it is silently dropped or immediately overdrawn.
 	void render(wxDC& dc);
 
 	bool GetCheck() { return m_bChecked; }
