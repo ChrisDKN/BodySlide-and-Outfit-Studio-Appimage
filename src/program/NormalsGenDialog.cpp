@@ -6,6 +6,31 @@ See the included LICENSE file
 #include "NormalsGenDialog.h"
 #include "../ui/PreviewPanel.h"
 
+#include <wx/filename.h>
+#include <wx/log.h>
+#include <wx/msgdlg.h>
+#include <wx/stdpaths.h>
+#include <wx/utils.h>
+
+namespace {
+// DirectXTex texconv. There is no official Linux build; users who want this
+// step generally have a native port or a wine wrapper of that name on PATH.
+// Hardcoding the .exe meant the call simply failed on Linux, silently.
+#ifdef _WINDOWS
+constexpr const char* TexconvCommand = "texconv.exe";
+#else
+constexpr const char* TexconvCommand = "texconv";
+#endif
+
+// The rendered intermediate used to be written to the current working
+// directory, which is arbitrary under a .desktop or Steam launch and may not be
+// writable at all. The basename is unchanged because texconv derives the name
+// of its output from the name of its input.
+wxString GetNormalMapTempFile() {
+	return wxFileName(wxStandardPaths::Get().GetTempDir(), "ngtemp.png").GetFullPath();
+}
+} // namespace
+
 NormalsGenDialog::NormalsGenDialog(wxWindow* parent, std::vector<NormalGenLayer>& inLayersRef)
 	: wxNormalsGenDlg(parent)
 	, refNormalGenLayers(inLayersRef) {
@@ -192,16 +217,67 @@ void NormalsGenDialog::doGenerateNormalMap(wxCommandEvent& WXUNUSED(event)) {
 	}
 
 	// rendering to lossless png (SOIL2 wants to run dxt1 compression on dds which loses lots of quality).
-	preview->RenderNormalMap("ngtemp.png");
+	const wxString tempFile = GetNormalMapTempFile();
+	preview->RenderNormalMap(std::string(tempFile.ToUTF8()));
 
-	if (cbCompress->IsChecked()) {
-		// compression using texconv .. pretty slow, but uses direct compute to make it a bit faster.
+	// Passed as an argument vector rather than one command line: output paths
+	// routinely contain spaces ("Fallout 4/Data/..."), which the concatenated
+	// form split into separate arguments.
+	const wxString args[] = {
+		TexconvCommand,
+		"-f",
+		// Compression is pretty slow, but uses direct compute to make it a bit
+		// faster. Uncompressed is 8bpp, still via texconv just because.
+		cbCompress->IsChecked() ? "BC7_UNORM" : "R8G8B8A8_UNORM",
+		tempFile,
+		"-o",
+		outfile.GetFullPath(),
+	};
+
+	std::vector<std::wstring> argStorage;
+	std::vector<const wchar_t*> argv;
+	argStorage.reserve(WXSIZEOF(args));
+	argv.reserve(WXSIZEOF(args) + 1);
+
+	for (const wxString& arg : args)
+		argStorage.push_back(arg.ToStdWstring());
+	for (const std::wstring& arg : argStorage)
+		argv.push_back(arg.c_str());
+	argv.push_back(nullptr);
+
+	long result = -1;
+	{
 		wxBusyCursor compressWait;
-		wxExecute("texconv.exe -f BC7_UNORM ngtemp.png -o " + outfile.GetFullPath(), wxEXEC_SYNC);
+		// wx logs its own execvp failure, which would otherwise surface as a
+		// second and much less helpful dialog on top of the report below.
+		wxLogNull suppressExecError;
+		// Both cases run synchronously: the uncompressed one used to be fired off
+		// asynchronously, which left nothing to report failures with and no point
+		// at which the intermediate could be cleaned up.
+		result = wxExecute(argv.data(), wxEXEC_SYNC);
+	}
+
+	if (wxFileExists(tempFile))
+		wxRemoveFile(tempFile);
+
+	if (result == 0)
+		return;
+
+	// Previously this failed silently, so on Linux "generate" appeared to work
+	// and simply produced no file.
+	if (result == -1) {
+		wxLogError("Normal map generation: could not run '%s'.", TexconvCommand);
+		wxMessageBox(wxString::Format(_("Could not run '%s', which is needed to write the .dds output.\n\nMake sure it is installed and on your PATH."), TexconvCommand),
+					 _("Normal Map Generation Failed"),
+					 wxICON_ERROR,
+					 this);
 	}
 	else {
-		// uncompressed 8bpp using texconv just because.
-		wxExecute("texconv.exe -f R8G8B8A8_UNORM ngtemp.png -o " + outfile.GetFullPath());
+		wxLogError("Normal map generation: '%s' failed with code %ld.", TexconvCommand, result);
+		wxMessageBox(wxString::Format(_("'%s' failed with code %ld, so no output was written."), TexconvCommand, result),
+					 _("Normal Map Generation Failed"),
+					 wxICON_ERROR,
+					 this);
 	}
 }
 
