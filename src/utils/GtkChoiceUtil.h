@@ -36,8 +36,18 @@ inline void BindSearchablePopup(wxChoice*) {}
 ///
 /// Returns false when the fast path does not apply (the widget is not backed by
 /// a GtkComboBox over a GtkListStore); the caller must then fall back to the
-/// portable Clear()/Append() path. Assumes the choice carries no client data,
-/// which is true of every choice this is used on.
+/// portable Clear()/Append() path.
+///
+/// IMPORTANT: this must be the last thing done to the choice's items. wxChoice
+/// reports GetCount() straight from the GTK model but keeps its client data in a
+/// separate array that only its own Append()/Insert()/Delete() grow, so filling
+/// the store here leaves that array empty. A following Append() then inserts
+/// into it at index GetCount(), which is way past its end -- an out-of-bounds
+/// heap write, seen as "malloc(): unaligned tcache chunk detected" or a segfault
+/// somewhere later. Pass the complete list of items in one call, and use only
+/// SetSelection()/GetString()/Clear() afterwards; Clear() puts both sides back
+/// in sync. Assumes the choice carries no client data, which is true of every
+/// choice this is used on.
 bool BulkSetItems(wxChoice* choice, const std::vector<wxString>& items);
 
 /// Replace the native drop-down with a searchable modal dialog.

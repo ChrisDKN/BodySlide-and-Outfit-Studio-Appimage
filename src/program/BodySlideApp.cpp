@@ -5225,15 +5225,12 @@ wxString BodySlideFrame::FavoriteChoiceLabel(const std::string& name, bool favor
 	return wxString::FromUTF8(FavoriteStar) + " " + label;
 }
 
-bool BodySlideFrame::SelectChoiceName(wxChoice* choice, const std::vector<std::string>& names, const std::string& selectItem) const {
-	for (size_t i = 0; i < names.size(); i++) {
-		if (names[i] == selectItem) {
-			choice->SetSelection(i);
-			return true;
-		}
-	}
+int BodySlideFrame::FindChoiceName(const std::vector<std::string>& names, const std::string& selectItem) const {
+	for (size_t i = 0; i < names.size(); i++)
+		if (names[i] == selectItem)
+			return static_cast<int>(i);
 
-	return false;
+	return wxNOT_FOUND;
 }
 
 void BodySlideFrame::SetFavoriteButtonBitmap(wxButton* button, bool favorite) const {
@@ -5277,9 +5274,23 @@ void BodySlideFrame::RebuildOutfitChoice(const std::string& selectItem) {
 	outfitChoice->Freeze();
 
 	std::vector<wxString> labels;
-	labels.reserve(outfitChoiceNames.size());
+	labels.reserve(outfitChoiceNames.size() + 1);
 	for (const auto& rawName : outfitChoiceNames)
 		labels.push_back(FavoriteChoiceLabel(rawName, app->IsFavoriteOutfit(rawName)));
+
+	// A selection that is not in the list any more stays visible as a bracketed
+	// placeholder. It has to go into the same batch as everything else: an
+	// Append() after BulkSetItems() would corrupt the heap, see GtkChoiceUtil.h.
+	int selection = FindChoiceName(outfitChoiceNames, selectedName);
+	if (selection == wxNOT_FOUND) {
+		wxString missingItem = wxString::FromUTF8(selectedName);
+		if (!missingItem.empty() && !missingItem.StartsWith("["))
+			missingItem = "[" + missingItem + "]";
+
+		selection = static_cast<int>(outfitChoiceNames.size());
+		outfitChoiceNames.push_back(selectedName);
+		labels.push_back(missingItem);
+	}
 
 	if (!GtkChoiceUtil::BulkSetItems(outfitChoice, labels)) {
 		outfitChoice->Clear();
@@ -5287,24 +5298,7 @@ void BodySlideFrame::RebuildOutfitChoice(const std::string& selectItem) {
 			outfitChoice->Append(label);
 	}
 
-	if (!SelectChoiceName(outfitChoice, outfitChoiceNames, selectedName)) {
-		int i = wxNOT_FOUND;
-		wxString missingItem = wxString::FromUTF8(selectedName);
-		if (missingItem.empty()) {
-			outfitChoiceNames.push_back("");
-			i = outfitChoice->Append("");
-		}
-		else if (!missingItem.StartsWith("[")) {
-			outfitChoiceNames.push_back(selectedName);
-			i = outfitChoice->Append("[" + missingItem + "]");
-		}
-		else {
-			outfitChoiceNames.push_back(selectedName);
-			i = outfitChoice->Append(missingItem);
-		}
-
-		outfitChoice->SetSelection(i);
-	}
+	outfitChoice->SetSelection(selection);
 
 	outfitChoice->Thaw();
 	populatingChoices = false;
@@ -5340,9 +5334,22 @@ void BodySlideFrame::RebuildPresetChoice(const std::string& selectItem) {
 	presetChoice->Freeze();
 
 	std::vector<wxString> labels;
-	labels.reserve(presetChoiceNames.size());
+	labels.reserve(presetChoiceNames.size() + 1);
 	for (const auto& rawName : presetChoiceNames)
 		labels.push_back(FavoriteChoiceLabel(rawName, app->IsFavoritePreset(rawName)));
+
+	// Same as in RebuildOutfitChoice(): the placeholder for a selection that is
+	// gone must be part of the batch, never appended afterwards.
+	int selection = FindChoiceName(presetChoiceNames, selectedName);
+	if (selection == wxNOT_FOUND) {
+		wxString missingItem = wxString::FromUTF8(selectedName);
+		if (!missingItem.empty() && !missingItem.StartsWith("["))
+			missingItem = "[" + missingItem + "]";
+
+		selection = static_cast<int>(presetChoiceNames.size());
+		presetChoiceNames.push_back(selectedName);
+		labels.push_back(missingItem);
+	}
 
 	if (!GtkChoiceUtil::BulkSetItems(presetChoice, labels)) {
 		presetChoice->Clear();
@@ -5350,24 +5357,7 @@ void BodySlideFrame::RebuildPresetChoice(const std::string& selectItem) {
 			presetChoice->Append(label);
 	}
 
-	if (!SelectChoiceName(presetChoice, presetChoiceNames, selectedName)) {
-		int i = wxNOT_FOUND;
-		wxString missingItem = wxString::FromUTF8(selectedName);
-		if (missingItem.empty()) {
-			presetChoiceNames.push_back("");
-			i = presetChoice->Append("");
-		}
-		else if (!missingItem.StartsWith("[")) {
-			presetChoiceNames.push_back(selectedName);
-			i = presetChoice->Append("[" + missingItem + "]");
-		}
-		else {
-			presetChoiceNames.push_back(selectedName);
-			i = presetChoice->Append(missingItem);
-		}
-
-		presetChoice->SetSelection(i);
-	}
+	presetChoice->SetSelection(selection);
 
 	presetChoice->Thaw();
 	populatingChoices = false;

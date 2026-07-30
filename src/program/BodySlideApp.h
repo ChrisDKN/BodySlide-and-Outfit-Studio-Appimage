@@ -493,7 +493,7 @@ private:
 
 	void OnEnterSliderWindow(wxMouseEvent& event);
 	wxString FavoriteChoiceLabel(const std::string& name, bool favorite) const;
-	bool SelectChoiceName(wxChoice* choice, const std::vector<std::string>& names, const std::string& selectItem) const;
+	int FindChoiceName(const std::vector<std::string>& names, const std::string& selectItem) const;
 	void SetFavoriteButtonBitmap(wxButton* button, bool favorite) const;
 	void UpdateFavoriteButtons();
 	void RebuildOutfitChoice(const std::string& selectItem);
