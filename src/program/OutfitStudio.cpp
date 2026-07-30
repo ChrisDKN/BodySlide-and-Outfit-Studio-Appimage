@@ -13743,6 +13743,7 @@ void wxGLPanel::OnShown() {
 	if (!context->IsOK()) {
 		wxLogError("Outfit Studio: OpenGL context is not OK.");
 		wxMessageBox(_("Outfit Studio: OpenGL context is not OK."), _("OpenGL Error"), wxICON_ERROR, os);
+		return;
 	}
 
 	gls.Initialize(this, context.get());
