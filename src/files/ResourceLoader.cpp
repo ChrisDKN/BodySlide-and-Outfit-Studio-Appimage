@@ -5,6 +5,7 @@ See the included LICENSE file
 
 #include "../render/GLMaterial.h"
 #include "../utils/ConfigurationManager.h"
+#include "../utils/PlatformUtil.h"
 
 #include "FSEngine/FSEngine.h"
 #include "FSEngine/FSManager.h"
@@ -40,17 +41,24 @@ GLuint ResourceLoader::LoadTexture(const std::string& inFileName, bool isCubeMap
 	if (reloadTextures && ti != textures.end())
 		textureID = ti->second;
 
+	// gli and SOIL open the file themselves, so they never see the case fallback
+	// in PlatformUtil::OpenFileStream. Texture paths come out of NIFs and
+	// materials with Windows casing, so without this a loose texture shipped as
+	// "Textures/CBBE/..." but referenced as "textures\cbbe\..." drops through to
+	// the archive scan below and ends up rendering as NoImg.
+	const std::string diskFileName = PlatformUtil::ResolveCaseInsensitivePath(inFileName);
+
 	// All textures (GLI)
 	if (fileExtStr == "dds" || fileExtStr == "ktx")
-		textureID = GLI_load_texture(inFileName, textureID);
+		textureID = GLI_load_texture(diskFileName, textureID);
 
 	// Cubemap fallback (SOIL)
 	if (!textureID && isCubeMap)
-		textureID = SOIL_load_OGL_single_cubemap(inFileName.c_str(), SOIL_DDS_CUBEMAP_FACE_ORDER, SOIL_LOAD_AUTO, textureID, SOIL_FLAG_GL_MIPMAPS);
+		textureID = SOIL_load_OGL_single_cubemap(diskFileName.c_str(), SOIL_DDS_CUBEMAP_FACE_ORDER, SOIL_LOAD_AUTO, textureID, SOIL_FLAG_GL_MIPMAPS);
 
 	// Texture and image fallback (SOIL)
 	if (!textureID)
-		textureID = SOIL_load_OGL_texture(inFileName.c_str(), SOIL_LOAD_AUTO, textureID, SOIL_FLAG_TEXTURE_REPEATS | SOIL_FLAG_MIPMAPS | SOIL_FLAG_GL_MIPMAPS);
+		textureID = SOIL_load_OGL_texture(diskFileName.c_str(), SOIL_LOAD_AUTO, textureID, SOIL_FLAG_TEXTURE_REPEATS | SOIL_FLAG_MIPMAPS | SOIL_FLAG_GL_MIPMAPS);
 
 	if (!textureID && Config.MatchValue("BSATextureScan", "true")) {
 		if (Config["GameDataPath"].empty()) {

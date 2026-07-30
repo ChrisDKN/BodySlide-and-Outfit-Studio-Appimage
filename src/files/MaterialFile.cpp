@@ -4,6 +4,7 @@ See the included LICENSE file
 */
 
 #include "MaterialFile.h"
+#include "../utils/PlatformUtil.h"
 #include "../utils/StringStuff.h"
 
 using namespace nifly;
@@ -13,7 +14,11 @@ MaterialFile::MaterialFile(const Type& signature) {
 }
 
 MaterialFile::MaterialFile(const std::string& fileName) {
-	std::ifstream input(fileName, std::ifstream::binary);
+	// Via PlatformUtil so the material name out of the NIF, which carries
+	// Windows casing and separators, still resolves on a case-sensitive
+	// filesystem.
+	std::fstream input;
+	PlatformUtil::OpenFileStream(input, fileName, std::ios::in | std::ios::binary);
 	if (!input) {
 		failed = true;
 		return;

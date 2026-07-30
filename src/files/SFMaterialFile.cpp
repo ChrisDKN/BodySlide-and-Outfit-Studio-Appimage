@@ -5,6 +5,8 @@ See the included LICENSE file
 
 #include "SFMaterialFile.h"
 
+#include "../utils/PlatformUtil.h"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -15,7 +17,11 @@ bool SFMaterialFile::IsTextureSlotInRange(size_t slot) {
 }
 
 SFMaterialFile::SFMaterialFile(const std::string& fileName) {
-    std::ifstream input(fileName);
+    // Via PlatformUtil so the material name out of the NIF, which carries
+    // Windows casing and separators, still resolves on a case-sensitive
+    // filesystem.
+    std::fstream input;
+    PlatformUtil::OpenFileStream(input, fileName, std::ios::in);
     if (!input) {
         failed = true;
         return;
