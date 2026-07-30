@@ -23,6 +23,22 @@ std::string WideToMultiByteACP(const std::wstring& wstr);
 std::wstring MultiByteToWideUTF8(const std::string& str);
 #endif
 
+/// Resolve a path against a case-sensitive filesystem, correcting the case of
+/// each component when an exact match does not exist.
+///
+/// Mod content is authored on Windows, where paths are case-insensitive, so an
+/// .osp or .nif routinely refers to "Meshes\Actors\Character" while the files on
+/// disk are "meshes/actors/character". That costs nothing on Windows and breaks
+/// on Linux. Archive lookups are unaffected (FSBSA lowercases both sides); this
+/// is only about loose files.
+///
+/// Returns the corrected path, or the input unchanged when it already exists or
+/// no case-insensitive match is found. On Windows this is the identity function.
+std::string ResolveCaseInsensitivePath(const std::string& path);
+
+/// Opens a file stream. On case-sensitive filesystems a failed *read* is retried
+/// once via ResolveCaseInsensitivePath(). Writes are never redirected: creating a
+/// file must use the name the caller chose.
 void OpenFileStream(std::fstream& file, const std::string& fileName, std::ios_base::openmode mode);
 bool FileExists(const std::string& fileName);
 
