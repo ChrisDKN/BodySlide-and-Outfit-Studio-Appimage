@@ -98,10 +98,24 @@ jobs:
       - name: Install debloated packages
         shell: bash
         run: |
-          # Slimmed rebuilds of two large transitive dependencies of
-          # wxwidgets-gtk3. Each provides/replaces the stock package, so the
-          # bundle shrinks without changing what gets linked.
-          get-debloated-pkgs icu-mini libxml2-mini
+          # Slimmed rebuilds of what this bundle actually ships. Each one
+          # provides/replaces the stock package, so quick-sharun deploys the
+          # smaller build without anything else changing.
+          #
+          # --add-opengl  mesa-mini. quick-sharun deploys mesa because wxGLCanvas
+          #               dlopens it, which drags in libLLVM + libgallium -- by
+          #               far the largest thing in the image.
+          # gtk3-mini     wxWidgets here is wxGTK3, so libgtk-3 is always bundled.
+          # glycin-mini   GTK3 pulls in glycin for image decoding; the stock
+          #               package ships heif/jxl/image-rs loaders (and libjxl)
+          #               on top of the svg one GTK actually needs for icons.
+          # libxml2-mini  bundled transitively.
+          #
+          # Deliberately NOT included: icu-mini, opus-mini, qt6-base-mini and
+          # gtk4-mini -- none of those libraries appear in this bundle, so they
+          # would be pure download with no effect. --add-vulkan likewise: this
+          # is a GL-only application.
+          get-debloated-pkgs --add-opengl gtk3-mini glycin-mini libxml2-mini
 
       - name: Checkout
         uses: actions/checkout@v6

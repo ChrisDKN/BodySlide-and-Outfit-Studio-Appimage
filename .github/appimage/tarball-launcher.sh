@@ -35,4 +35,11 @@ export BSOS_APPDIR
 # they get the bundled libraries, rather than exec'ing the raw ELF directly.
 export BSOS_BINDIR="$ROOT/bin"
 
+# bin/ holds helper executables the bundle spawns by name rather than by path --
+# notably glycin's image loaders (glycin-svg and friends), which GTK invokes to
+# decode icon theme SVGs. They are spawned with execvp, which resolves against
+# this process's PATH, so without this GTK aborts the moment it has to render an
+# icon it cannot find. The AppImage's AppRun does the same thing.
+export PATH="$ROOT/bin:$PATH"
+
 exec "$ROOT/bin/@BIN@" "$@"
