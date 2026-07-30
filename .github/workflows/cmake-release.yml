@@ -1,7 +1,28 @@
 name: CMake RelWithDebInfo
 
+# Validation build. A bare `on: push` also fired this for every feature-branch
+# commit and for release tags, where linux-release.yml already rebuilds
+# everything -- so it is scoped to the branches and pull requests where the
+# result is actually looked at.
+#
+# paths-ignore covers files that cannot change the build output: lang/ holds
+# .po/.pot translations that nothing in CMakeLists.txt compiles (they are copied
+# verbatim at package time), and the rest is documentation.
 on:
   push:
+    branches: [dev, main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.github/ISSUE_TEMPLATE/**'
+      - 'lang/**'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.github/ISSUE_TEMPLATE/**'
+      - 'lang/**'
+  workflow_dispatch:
 
 permissions:
   contents: read
