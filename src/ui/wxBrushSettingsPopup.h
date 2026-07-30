@@ -53,16 +53,30 @@ class wxBrushSettingsPopupTransient : public wxPopupTransientWindow, public wxBr
 private:
 	bool stayOpen = false;
 
+	// wxWindow::IsMouseInWindow() is MSW-only, so test the pointer against the
+	// parent's screen rectangle instead. That ignores occlusion, which errs
+	// towards keeping the popup open -- the direction the setting asks for.
+	bool IsMouseOverParent() const {
+		const wxWindow* parent = GetParent();
+		return parent && parent->GetScreenRect().Contains(wxGetMousePosition());
+	}
+
 public:
 	wxBrushSettingsPopupTransient(OutfitStudioFrame* parent, bool stayOpen);
 
-#ifdef _WINDOWS
-	// IsMouseInWindow is only available on Windows
+	// Anchored to a toolbar button, this popup is meant to survive clicks
+	// elsewhere in the window. The override used to be MSW-only, so on GTK the
+	// stay-open setting did nothing and any outside click closed the popup.
+	//
+	// Defers to the base rather than calling Hide(): outside MSW, Dismiss() also
+	// removes the popup's event handlers, and hiding without that would leave
+	// them installed on a hidden window.
 	void Dismiss() override {
-		if (!stayOpen || !GetParent()->IsMouseInWindow())
-			Hide();
+		if (!stayOpen || !IsMouseOverParent())
+			wxPopupTransientWindow::Dismiss();
 	}
 
+#ifdef _WINDOWS
 	void MSWDismissUnfocusedPopup() override {
 		if (stayOpen)
 			Dismiss();
