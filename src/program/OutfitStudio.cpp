@@ -36,6 +36,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "AutomationDialog.h"
 #include "../components/ClippingFixer.h"
 #include "../utils/FileSearchUtil.h"
+#include "../utils/GtkChoiceUtil.h"
 #include "../utils/ProjectUtil.h"
 #include "../utils/GameUtil.h"
 #include "../utils/StackTrace.h"
@@ -1442,6 +1443,12 @@ OutfitStudioFrame::OutfitStudioFrame(const wxPoint& pos, const wxSize& size) {
 
 	cXMirrorBone = (wxChoice*)FindWindowByName("cXMirrorBone");
 	cPoseBone = (wxChoice*)FindWindowByName("cPoseBone");
+
+	// A detailed rig puts thousands of bones in these, which is enough for a
+	// GtkComboBox popup to exceed Wayland's surface size limit and take the
+	// process with it. No-op off GTK3.
+	GtkChoiceUtil::BindSearchablePopup(cXMirrorBone);
+	GtkChoiceUtil::BindSearchablePopup(cPoseBone);
 	rxPoseSlider = (wxSlider*)FindWindowByName("rxPoseSlider");
 	ryPoseSlider = (wxSlider*)FindWindowByName("ryPoseSlider");
 	rzPoseSlider = (wxSlider*)FindWindowByName("rzPoseSlider");
