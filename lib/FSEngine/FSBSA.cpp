@@ -42,13 +42,10 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <wx/zstream.h>
 #include <vector>
 #include <algorithm>
+#include <cstring>
 
 #include "../LZ4F/lz4.h"
 #include "../LZ4F/lz4frame.h"
-
-#ifndef MAX_PATH
-#define MAX_PATH 4096
-#endif
 
 wxUint32 BSA::BSAFile::size() const {
 	if (sizeFlags > 0) {
@@ -241,25 +238,47 @@ bool BSA::open() {
 			numFiles = ba2Header.numFiles;
 			namePrefix = false;
 
-			fileNameSuperBuffer = std::make_unique<char[]>(numFiles * (MAX_PATH + 2) + 1);
+			// The name table runs from nameTableOffset to the end of the archive,
+			// so take its size from that instead of guessing a worst case per
+			// entry. The buffer is value-initialized and kept for the lifetime of
+			// the archive, so the old numFiles * (MAX_PATH + 2) guess was resident
+			// memory: MAX_PATH is not defined on Linux and the local fallback was
+			// 4096, making that ~4 KB per file, or a few hundred MB for a large
+			// Starfield/Fallout 4 archive against ~260 bytes per file on Windows.
+			const wxFileOffset bsaLength = bsa.Length();
+			size_t nameTableSize = 0;
+			if (bsaLength > 0 && ba2Header.nameTableOffset < static_cast<wxUint64>(bsaLength))
+				nameTableSize = static_cast<size_t>(bsaLength - ba2Header.nameTableOffset);
+
+			fileNameSuperBuffer = std::make_unique<char[]>(nameTableSize + 1);
 			char* superBufferPtr = fileNameSuperBuffer.get();
 			std::vector<wxUint32> path_sizes(numFiles * 2);
 
-			if (bsa.Seek(ba2Header.nameTableOffset)) {
-				bsa.Read(superBufferPtr, numFiles * (MAX_PATH + 2));
-				wxUint32 cursor = 0;
+			if (nameTableSize > 0 && bsa.Seek(ba2Header.nameTableOffset)) {
+				bsa.Read(superBufferPtr, nameTableSize);
+				size_t cursor = 0;
 				wxUint32 n = 0;
 				for (wxUint32 i = 0; i < ba2Header.numFiles; i++) {
+					// Bounds-checked now that the buffer is sized to the table
+					// rather than over-allocated: a truncated or malformed name
+					// table must stop here, not read past the end.
+					if (cursor + 2 > nameTableSize)
+						break;
+
 					wxUint16 len;
-					len = *(wxUint16*)(superBufferPtr + cursor);
+					memcpy(&len, superBufferPtr + cursor, sizeof(len));
 					cursor += 2;
-					path_sizes[n++] = cursor;
+
+					if (cursor + len > nameTableSize)
+						break;
+
+					path_sizes[n++] = static_cast<wxUint32>(cursor);
 					cursor += len;
-					path_sizes[n++] = cursor;
+					path_sizes[n++] = static_cast<wxUint32>(cursor);
 				}
 			}
 
-			std::replace(superBufferPtr, superBufferPtr + numFiles * (MAX_PATH + 2), '\\', '/');
+			std::replace(superBufferPtr, superBufferPtr + nameTableSize, '\\', '/');
 
 			std::string h(ba2Header.type, 4);
 			if (h == "GNRL") {
