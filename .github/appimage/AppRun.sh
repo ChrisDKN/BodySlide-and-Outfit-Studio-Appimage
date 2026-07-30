@@ -95,11 +95,17 @@ for f in Config.xml BodySlide.xml OutfitStudio.xml BuildSelection.xml RefTemplat
 	fi
 done
 
-# Directories the programs read from and mod managers deploy into.
-for d in SliderSets Automations PoseData RefTemplates ShapeData \
-         SliderCategories SliderGroups SliderPresets; do
-	mkdir -p "$BSOS_APPDIR/$d"
-done
+# NOTE: do NOT pre-create SliderSets/ShapeData/SliderPresets/... here.
+# Their existence is a signal, not just storage: ProjectUtil::GetProjectPath()
+# treats "does <data dir>/SliderSets exist?" as "this directory is the project
+# directory" and returns immediately, ahead of the game data path. An empty
+# SliderSets therefore hijacks discovery and BodySlide silently lists nothing,
+# instead of finding the outfits a mod manager deployed to
+# <GameData>/CalienteTools/BodySlide.
+#
+# Leaving them absent keeps auto-discovery working. Anyone wanting a
+# self-contained setup creates SliderSets themselves (or a mod manager does),
+# which then deliberately opts into the data dir being the project directory.
 
 # ---------------------------------------------------------------------------
 # Pick the program to run

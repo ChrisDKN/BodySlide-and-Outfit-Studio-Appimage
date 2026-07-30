@@ -153,7 +153,10 @@ for bin in BodySlide OutfitStudio; do
 	chmod 755 "$TAR_DIR/$bin"
 done
 
-mkdir -p "$TAR_DIR"/{SliderSets,Automations,PoseData,RefTemplates,ShapeData,SliderCategories,SliderGroups,SliderPresets}
+# Deliberately no empty SliderSets/ShapeData/... here -- see the note in
+# AppRun.sh. An existing SliderSets makes GetProjectPath() return this directory
+# and stop looking, so shipping them empty would break outfit discovery for
+# every user whose mods live in the game's CalienteTools/BodySlide folder.
 
 tar --zstd -C "$TAR_ROOT" -cf "$FINAL_OUTPATH/${PKGNAME}.tar.zst" "$PKGNAME"
 

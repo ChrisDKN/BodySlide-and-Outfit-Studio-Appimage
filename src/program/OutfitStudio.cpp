@@ -528,6 +528,10 @@ bool OutfitStudio::OnInit() {
 	logger.Initialize(Config.GetIntValue("LogLevel", 2), dataDir + "/Log_OS.txt");
 	wxLogMessage("Initializing Outfit Studio...");
 
+	// After the logger so the outcome is recorded, and before SetDefaultConfig()
+	// or anything else reads TargetGame / GameDataPath.
+	GameUtil::ApplyEnvironmentOverrides();
+
 #ifdef NDEBUG
 	wxHandleFatalExceptions();
 #endif

@@ -36,20 +36,23 @@ std::string ProjectUtil::GetProjectPath() {
 	std::string appDir = Config["AppDir"];
 	std::string gameDataPath = Config["GameDataPath"];
 
-	// Build list of paths to check in order of preference
-	std::vector<std::string> pathsToCheck;
-
-	// First priority: configured ProjectPath (if set)
-	if (!projectPath.empty()) {
-		pathsToCheck.push_back(projectPath);
+	// First priority: an explicitly configured ProjectPath. This has to be
+	// resolved ahead of the appDir check below, otherwise an appDir that merely
+	// happens to contain a SliderSets directory silently overrides the path the
+	// user actually asked for.
+	if (!projectPath.empty() && wxDir::Exists(projectPath)) {
+		return projectPath;
 	}
 
-	// Check if SliderSets subdirectory exists in appDir, but return appDir if it does
+	// A SliderSets directory beside the app marks it as a self-contained
+	// install -- the usual Windows layout, where BodySlide is unpacked into
+	// Data/CalienteTools/BodySlide and its data sits next to the executable.
 	if (wxDir::Exists(appDir + PathSepStr + "SliderSets")) {
 		return appDir;
 	}
 
 	// Fallback paths in order of preference
+	std::vector<std::string> pathsToCheck;
 	pathsToCheck.push_back(gameDataPath + PathSepStr + "CalienteTools" + PathSepStr + "BodySlide");
 	pathsToCheck.push_back(gameDataPath + PathSepStr + "Tools" + PathSepStr + "BodySlide");
 
