@@ -43,7 +43,12 @@ namespace GameUtil {
 	void ApplyEnvironmentOverrides();
 
 	/// Get the game data path for the specified target game.
-	/// Checks config "GameDataPaths/<gamename>" first, then falls back to Windows registry on Windows.
+	///
+	/// Checks config "GameDataPaths/<gamename>" first. With nothing configured
+	/// it falls back to the registry on Windows, and on Linux to the Steam
+	/// libraries: every library listed in libraryfolders.vdf is probed for the
+	/// game's app manifest, and the install directory recorded there gives the
+	/// Data folder. Returns an empty string when the game cannot be located.
 	wxString GetGameDataPath(int targ);
 
 	/// Initialize archive loading (BSA/BA2 files) for the currently configured game.
