@@ -127,7 +127,7 @@ void PresetSaveDialog::OnSave(wxCommandEvent& WXUNUSED(event)) {
 
 	wxFileDialog savePresetDialog(this,
 								  "Choose a preset file",
-								  wxString::FromUTF8(ProjectUtil::GetProjectPath()) + "/SliderPresets",
+								  wxString::FromUTF8(ProjectUtil::GetProjectSubPath("SliderPresets")),
 								  wxString::FromUTF8(presetFile),
 								  "Preset Files (*.xml)|*.xml",
 								  wxFD_SAVE);

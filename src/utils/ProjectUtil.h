@@ -27,5 +27,22 @@ namespace ProjectUtil {
 	///   2. GameDataPath/CalienteTools/BodySlide
 	///   3. GameDataPath/Tools/BodySlide
 	/// Falls back to AppDir if no configured path and no fallback exists.
+	///
+	/// The fallback directory names are matched ignoring case, because mod
+	/// archives authored on Windows routinely deploy them as "calientetools/
+	/// bodyslide".
 	std::string GetProjectPath();
+
+	/// Path to a fixed-name entry under the project path ("SliderSets",
+	/// "SliderPresets", "RefTemplates.xml", ...), with the case corrected to
+	/// whatever is actually on disk. Use this instead of appending the name to
+	/// GetProjectPath(): on a case-sensitive filesystem an exact-case append
+	/// silently enumerates nothing when the mod shipped a differently-cased
+	/// directory.
+	///
+	/// Returns the requested path unchanged when no match exists, so callers
+	/// still fail on the name they asked for. When building a path to a file
+	/// that may not exist yet, resolve the directory with this and append the
+	/// file name, so the new file keeps the caller's spelling.
+	std::string GetProjectSubPath(const std::string& name);
 } // namespace ProjectUtil

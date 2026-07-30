@@ -5,6 +5,7 @@ See the included LICENSE file
 
 #include "ProjectUtil.h"
 #include "ConfigurationManager.h"
+#include "PlatformUtil.h"
 #include "StringStuff.h"
 
 #include <wx/dir.h>
@@ -47,7 +48,7 @@ std::string ProjectUtil::GetProjectPath() {
 	// A SliderSets directory beside the app marks it as a self-contained
 	// install -- the usual Windows layout, where BodySlide is unpacked into
 	// Data/CalienteTools/BodySlide and its data sits next to the executable.
-	if (wxDir::Exists(appDir + PathSepStr + "SliderSets")) {
+	if (wxDir::Exists(PlatformUtil::ResolveCaseInsensitivePath(appDir + PathSepStr + "SliderSets"))) {
 		return appDir;
 	}
 
@@ -56,13 +57,20 @@ std::string ProjectUtil::GetProjectPath() {
 	pathsToCheck.push_back(gameDataPath + PathSepStr + "CalienteTools" + PathSepStr + "BodySlide");
 	pathsToCheck.push_back(gameDataPath + PathSepStr + "Tools" + PathSepStr + "BodySlide");
 
-	// Return first existing path
+	// Return first existing path. Resolved rather than compared verbatim: a mod
+	// archive extracted on Linux keeps whatever case it was authored with, so
+	// the tool directory is as likely to be "calientetools/bodyslide".
 	for (const auto& path : pathsToCheck) {
-		if (wxDir::Exists(path)) {
-			return path;
+		const std::string resolved = PlatformUtil::ResolveCaseInsensitivePath(path);
+		if (wxDir::Exists(resolved)) {
+			return resolved;
 		}
 	}
 
 	// If no path exists, return projectPath if configured, otherwise AppDir
 	return !projectPath.empty() ? projectPath : appDir;
+}
+
+std::string ProjectUtil::GetProjectSubPath(const std::string& name) {
+	return PlatformUtil::ResolveCaseInsensitivePath(GetProjectPath() + PathSepStr + name);
 }

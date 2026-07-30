@@ -2050,7 +2050,7 @@ std::vector<NiShape*> AutomationDialog::ResolveTargetShapes(const AutomationStep
 }
 
 std::string AutomationDialog::GetAutomationsFolder() {
-	return ProjectUtil::GetProjectPath() + "/Automations";
+	return ProjectUtil::GetProjectSubPath("Automations");
 }
 
 void AutomationDialog::CollectScripts(const wxString& baseFolder, const wxString& currentFolder, std::vector<std::pair<wxString, wxString>>& entries) {

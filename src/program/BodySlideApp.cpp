@@ -780,8 +780,9 @@ int BodySlideApp::LoadSliderSets() {
 	outFileCount.clear();
 
 	wxArrayString files;
-	wxDir::GetAllFiles(wxString::FromUTF8(ProjectUtil::GetProjectPath()) + "/SliderSets", &files, "*.osp");
-	wxDir::GetAllFiles(wxString::FromUTF8(ProjectUtil::GetProjectPath()) + "/SliderSets", &files, "*.xml");
+	const wxString sliderSetsDir = wxString::FromUTF8(ProjectUtil::GetProjectSubPath("SliderSets"));
+	wxDir::GetAllFiles(sliderSetsDir, &files, "*.osp");
+	wxDir::GetAllFiles(sliderSetsDir, &files, "*.xml");
 
 	bool filterHasZaps = false;
 
@@ -3052,7 +3053,7 @@ void BodySlideApp::InitLanguage() {
 void BodySlideApp::LoadAllCategories() {
 	wxLogMessage("Loading all slider categories...");
 	cCollection.Clear();
-	cCollection.LoadCategories(ProjectUtil::GetProjectPath() + "/SliderCategories");
+	cCollection.LoadCategories(ProjectUtil::GetProjectSubPath("SliderCategories"));
 }
 
 void BodySlideApp::SetPresetGroups(const std::string& setName) {
@@ -3082,7 +3083,7 @@ void BodySlideApp::SetPresetGroups(const std::string& setName) {
 
 void BodySlideApp::LoadAllGroups() {
 	wxLogMessage("Loading all slider groups...");
-	gCollection.LoadGroups(ProjectUtil::GetProjectPath() + "/SliderGroups");
+	gCollection.LoadGroups(ProjectUtil::GetProjectSubPath("SliderGroups"));
 
 	ungroupedOutfits.clear();
 	for (auto& o : outfitNameSource) {
@@ -3341,7 +3342,7 @@ void BodySlideApp::LoadPresets(const std::string& sliderSet) {
 				groups_and_aliases.push_back(ag.first);
 	}
 
-	sliderManager.LoadPresets(ProjectUtil::GetProjectPath() + "/SliderPresets", outfit, groups_and_aliases, groups_and_aliases.empty());
+	sliderManager.LoadPresets(ProjectUtil::GetProjectSubPath("SliderPresets"), outfit, groups_and_aliases, groups_and_aliases.empty());
 }
 
 void BodySlideApp::GetPresetNames(std::vector<std::string>& outNames) {
@@ -4733,7 +4734,7 @@ void BodySlideApp::GroupBuild(const std::vector<std::string>& groupNames) {
 	}
 
 	std::vector<std::string> groups;
-	sliderManager.LoadPresets(ProjectUtil::GetProjectPath() + "/SliderPresets", "", groups, true);
+	sliderManager.LoadPresets(ProjectUtil::GetProjectSubPath("SliderPresets"), "", groups, true);
 
 	// Apply saved build selections for CLI group builds before entering batch build conflict handling.
 	BuildSelectionFile buildSelFile;
@@ -5886,7 +5887,7 @@ void BodySlideFrame::OnSaveGroups(wxCommandEvent& WXUNUSED(event)) {
 
 	wxFileDialog saveGroupDialog(this,
 								 _("Choose or create group file"),
-								 wxString::FromUTF8(ProjectUtil::GetProjectPath()) + "/SliderGroups",
+								 wxString::FromUTF8(ProjectUtil::GetProjectSubPath("SliderGroups")),
 								 wxEmptyString,
 								 "Group Files (*.xml)|*.xml",
 								 wxFD_SAVE);

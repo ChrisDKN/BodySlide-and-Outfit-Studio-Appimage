@@ -1769,8 +1769,9 @@ void OutfitStudioFrame::OnPackProjects(wxCommandEvent& WXUNUSED(event)) {
 		});
 
 		wxArrayString files;
-		wxDir::GetAllFiles(wxString::FromUTF8(ProjectUtil::GetProjectPath()) + "/SliderSets", &files, "*.osp");
-		wxDir::GetAllFiles(wxString::FromUTF8(ProjectUtil::GetProjectPath()) + "/SliderSets", &files, "*.xml");
+		const wxString sliderSetsDir = wxString::FromUTF8(ProjectUtil::GetProjectSubPath("SliderSets"));
+		wxDir::GetAllFiles(sliderSetsDir, &files, "*.osp");
+		wxDir::GetAllFiles(sliderSetsDir, &files, "*.xml");
 
 		for (auto& file : files) {
 			std::string fileName{file.ToUTF8()};
@@ -1814,7 +1815,7 @@ void OutfitStudioFrame::OnPackProjects(wxCommandEvent& WXUNUSED(event)) {
 		});
 
 		auto groupFile = XRCCTRL(*packProjects, "groupFile", wxFilePickerCtrl);
-		groupFile->SetInitialDirectory(wxString::FromUTF8(ProjectUtil::GetProjectPath()) + "/SliderGroups");
+		groupFile->SetInitialDirectory(wxString::FromUTF8(ProjectUtil::GetProjectSubPath("SliderGroups")));
 
 		auto mergedFileName = XRCCTRL(*packProjects, "mergedFileName", wxTextCtrl);
 		auto packFolder = XRCCTRL(*packProjects, "packFolder", wxButton);
@@ -2448,7 +2449,7 @@ bool OutfitStudioFrame::SaveProjectAs() {
 		wxString sssName = wxString::FromUTF8(outName);
 
 		XRCCTRL(dlg, "sssName", wxTextCtrl)->SetValue(sssName);
-		XRCCTRL(dlg, "sssSliderSetFile", wxFilePickerCtrl)->SetInitialDirectory(wxString::FromUTF8(ProjectUtil::GetProjectPath()) + "/SliderSets");
+		XRCCTRL(dlg, "sssSliderSetFile", wxFilePickerCtrl)->SetInitialDirectory(wxString::FromUTF8(ProjectUtil::GetProjectSubPath("SliderSets")));
 
 		if (!project->mFileName.empty())
 			XRCCTRL(dlg, "sssSliderSetFile", wxFilePickerCtrl)->SetPath(project->mFileName);
@@ -4181,7 +4182,7 @@ void OutfitStudioFrame::OnNewProject(wxCommandEvent& WXUNUSED(event)) {
 void OutfitStudioFrame::OnLoadProject(wxCommandEvent& WXUNUSED(event)) {
 	wxFileDialog loadProjectDialog(this,
 								   _("Select a slider set to load"),
-								   wxString::FromUTF8(ProjectUtil::GetProjectPath()) + "/SliderSets",
+								   wxString::FromUTF8(ProjectUtil::GetProjectSubPath("SliderSets")),
 								   wxEmptyString,
 								   "Slider Set Files (*.osp;*.xml)|*.osp;*.xml",
 								   wxFD_FILE_MUST_EXIST);
@@ -4198,7 +4199,7 @@ void OutfitStudioFrame::OnLoadProject(wxCommandEvent& WXUNUSED(event)) {
 void OutfitStudioFrame::OnAddProject(wxCommandEvent& WXUNUSED(event)) {
 	wxFileDialog addProjectDialog(this,
 								  _("Select a slider set to add"),
-								  wxString::FromUTF8(ProjectUtil::GetProjectPath()) + "/SliderSets",
+								  wxString::FromUTF8(ProjectUtil::GetProjectSubPath("SliderSets")),
 								  wxEmptyString,
 								  "Slider Set Files (*.osp;*.xml)|*.osp;*.xml",
 								  wxFD_FILE_MUST_EXIST);
@@ -4477,14 +4478,14 @@ void OutfitStudioFrame::ResetProject() {
 void OutfitStudioFrame::UpdateReferenceTemplates() {
 	refTemplates.clear();
 
-	std::string fileName = ProjectUtil::GetProjectPath() + "/RefTemplates.xml";
+	std::string fileName = ProjectUtil::GetProjectSubPath("RefTemplates.xml");
 	if (wxFileName::IsFileReadable(fileName)) {
 		RefTemplateFile refTemplateFile(fileName);
 		refTemplateFile.GetAll(refTemplates);
 	}
 
 	RefTemplateCollection refTemplateCol;
-	refTemplateCol.Load(ProjectUtil::GetProjectPath() + "/RefTemplates");
+	refTemplateCol.Load(ProjectUtil::GetProjectSubPath("RefTemplates"));
 	refTemplateCol.GetAll(refTemplates);
 }
 
@@ -4752,7 +4753,7 @@ void OutfitStudioFrame::UpdateAnimationGUI() {
 	auto cPoseName = (wxComboBox*)FindWindowByName("cPoseName");
 	cPoseName->Clear();
 
-	std::string poseDataPath = ProjectUtil::GetProjectPath() + "/PoseData";
+	std::string poseDataPath = ProjectUtil::GetProjectSubPath("PoseData");
 	poseDataCollection.LoadData(poseDataPath);
 
 	// Additionally load community-supplied ScreenArcherMenu/SAF poses if the
@@ -8541,7 +8542,7 @@ void OutfitStudioFrame::OnLoadPreset(wxCommandEvent& WXUNUSED(event)) {
 
 	CloseBrushSettings();
 
-	presets.LoadPresets(ProjectUtil::GetProjectPath() + "/SliderPresets", choice, names, true);
+	presets.LoadPresets(ProjectUtil::GetProjectSubPath("SliderPresets"), choice, names, true);
 	presets.GetPresetNames(names);
 
 	if (wxXmlResource::Get()->LoadDialog(&dlg, this, "dlgChoosePreset")) {
@@ -8607,7 +8608,7 @@ void OutfitStudioFrame::OnSavePreset(wxCommandEvent& WXUNUSED(event)) {
 	CloseBrushSettings();
 
 	SliderSetGroupCollection groupCollection;
-	groupCollection.LoadGroups(ProjectUtil::GetProjectPath() + "/SliderGroups");
+	groupCollection.LoadGroups(ProjectUtil::GetProjectSubPath("SliderGroups"));
 
 	std::set<std::string> allGroups;
 	groupCollection.GetAllGroups(allGroups);
@@ -13460,7 +13461,7 @@ void OutfitStudioFrame::OnSavePose(wxCommandEvent& WXUNUSED(event)) {
 		cPoseName->SetSelection(poseSel);
 	}
 
-	wxString dirName = wxString::FromUTF8(ProjectUtil::GetProjectPath()) + "/PoseData";
+	wxString dirName = wxString::FromUTF8(ProjectUtil::GetProjectSubPath("PoseData"));
 	wxFileName::Mkdir(dirName, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
 
 	wxString fileName = dirName + "/" + wxString::FromUTF8(PoseDataCollection::SanitizeFileStem(poseData->name).c_str()) + ".xml";
@@ -13492,7 +13493,7 @@ void OutfitStudioFrame::OnDeletePose(wxCommandEvent& WXUNUSED(event)) {
 		if (result != wxYES)
 			return;
 
-		wxString fileName = wxString::FromUTF8(ProjectUtil::GetProjectPath()) + "/PoseData/" + wxString::FromUTF8(PoseDataCollection::SanitizeFileStem(poseData->name).c_str()) + ".xml";
+		wxString fileName = wxString::FromUTF8(ProjectUtil::GetProjectSubPath("PoseData")) + "/" + wxString::FromUTF8(PoseDataCollection::SanitizeFileStem(poseData->name).c_str()) + ".xml";
 		wxRemoveFile(fileName);
 
 		cPoseName->Delete(poseSel);
