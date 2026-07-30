@@ -48,6 +48,19 @@ if [ -f "$APPDIR"/AppRun.lib ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Host GTK modules
+# ---------------------------------------------------------------------------
+# Desktops such as Cinnamon/Mint and some GNOME setups export GTK_MODULES
+# (colorreload-gtk-module, window-decorations-gtk-module, ...). Those are host
+# .so files built against the host's GTK; the bundled GTK looks for them under
+# its own GTK_PATH, does not find them, and prints "Failed to load module" for
+# each one. They are desktop-integration extras the bundle cannot use in any
+# case, so drop them rather than emit a warning per module on every launch.
+# anylinux.so does not cover this: it clears bundle variables leaking *out* to
+# child processes, whereas GTK_MODULES arrives from the host.
+unset GTK_MODULES GTK3_MODULES
+
+# ---------------------------------------------------------------------------
 # Writable data directory
 # ---------------------------------------------------------------------------
 # A mod manager (or anyone wanting several parallel setups) overrides this to

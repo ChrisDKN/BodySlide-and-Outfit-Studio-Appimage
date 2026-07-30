@@ -42,4 +42,10 @@ export BSOS_BINDIR="$ROOT/bin"
 # icon it cannot find. The AppImage's AppRun does the same thing.
 export PATH="$ROOT/bin:$PATH"
 
+# Host desktops (Cinnamon/Mint and friends) export GTK_MODULES pointing at
+# their own GTK modules. The bundled GTK cannot load them and warns once per
+# module on startup; they are desktop-integration extras, so drop them. Same
+# reasoning as the AppImage's AppRun.
+unset GTK_MODULES GTK3_MODULES
+
 exec "$ROOT/bin/@BIN@" "$@"
