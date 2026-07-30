@@ -27,6 +27,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "../utils/StringStuff.h"
 #include "../utils/ProjectUtil.h"
 #include "../utils/GameUtil.h"
+#include "../utils/GtkChoiceUtil.h"
 
 #include <algorithm>
 #include <atomic>
@@ -4920,6 +4921,10 @@ BodySlideFrame::BodySlideFrame(BodySlideApp* a, const wxSize& size)
 	btnFavoritePreset = (wxButton*)FindWindowByName("btnFavoritePreset", this);
 	btnSavePreset = (wxButton*)FindWindowByName("btnSavePreset", this);
 
+	// Both lists routinely grow past what a GTK3 drop-down can render.
+	GtkChoiceUtil::BindSearchablePopup(outfitChoice);
+	GtkChoiceUtil::BindSearchablePopup(presetChoice);
+
 	xrc->Load(wxString::FromUTF8(Config["AppDir"]) + "/res/xrc/BatchBuild.xrc");
 	xrc->Load(wxString::FromUTF8(Config["AppDir"]) + "/res/xrc/Settings.xrc");
 	xrc->Load(wxString::FromUTF8(Config["AppDir"]) + "/res/xrc/About.xrc");
@@ -5224,10 +5229,17 @@ void BodySlideFrame::RebuildOutfitChoice(const std::string& selectItem) {
 	populatingChoices = true;
 	wxEventBlocker blocker(outfitChoice, wxEVT_CHOICE);
 	outfitChoice->Freeze();
-	outfitChoice->Clear();
 
+	std::vector<wxString> labels;
+	labels.reserve(outfitChoiceNames.size());
 	for (const auto& rawName : outfitChoiceNames)
-		outfitChoice->Append(FavoriteChoiceLabel(rawName, app->IsFavoriteOutfit(rawName)));
+		labels.push_back(FavoriteChoiceLabel(rawName, app->IsFavoriteOutfit(rawName)));
+
+	if (!GtkChoiceUtil::BulkSetItems(outfitChoice, labels)) {
+		outfitChoice->Clear();
+		for (const auto& label : labels)
+			outfitChoice->Append(label);
+	}
 
 	if (!SelectChoiceName(outfitChoice, outfitChoiceNames, selectedName)) {
 		int i = wxNOT_FOUND;
@@ -5280,10 +5292,17 @@ void BodySlideFrame::RebuildPresetChoice(const std::string& selectItem) {
 	populatingChoices = true;
 	wxEventBlocker blocker(presetChoice, wxEVT_CHOICE);
 	presetChoice->Freeze();
-	presetChoice->Clear();
 
+	std::vector<wxString> labels;
+	labels.reserve(presetChoiceNames.size());
 	for (const auto& rawName : presetChoiceNames)
-		presetChoice->Append(FavoriteChoiceLabel(rawName, app->IsFavoritePreset(rawName)));
+		labels.push_back(FavoriteChoiceLabel(rawName, app->IsFavoritePreset(rawName)));
+
+	if (!GtkChoiceUtil::BulkSetItems(presetChoice, labels)) {
+		presetChoice->Clear();
+		for (const auto& label : labels)
+			presetChoice->Append(label);
+	}
 
 	if (!SelectChoiceName(presetChoice, presetChoiceNames, selectedName)) {
 		int i = wxNOT_FOUND;

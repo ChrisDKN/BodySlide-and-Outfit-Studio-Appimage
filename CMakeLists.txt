@@ -73,6 +73,23 @@ if(UNIX AND NOT APPLE)
 	endif()
 endif()
 
+# BodySlide works around several GTK3 limitations directly (see GtkChoiceUtil).
+# Optional: without it those workarounds compile away and the native widgets are
+# used as-is.
+set(BSOS_HAVE_GTK3 OFF)
+if(UNIX AND NOT APPLE)
+	find_package(PkgConfig QUIET)
+	if(PkgConfig_FOUND)
+		pkg_check_modules(GTK3 QUIET gtk+-3.0)
+		if(GTK3_FOUND)
+			set(BSOS_HAVE_GTK3 ON)
+			message(STATUS "GTK3 found: BodySlide will build with the GTK3 widget workarounds")
+		else()
+			message(STATUS "GTK3 not found: BodySlide will build without the GTK3 widget workarounds")
+		endif()
+	endif()
+endif()
+
 set(BSOS_FBXSDK_HINTS)
 foreach(candidate IN ITEMS
 		"${BSOS_FBXSDK_ROOT}"
@@ -340,6 +357,10 @@ if(WIN32)
 	list(APPEND BSOS_BODYSLIDE_SOURCES BodySlide.rc)
 endif()
 
+if(BSOS_HAVE_GTK3)
+	list(APPEND BSOS_BODYSLIDE_SOURCES src/utils/GtkChoiceUtil.cpp)
+endif()
+
 add_executable(OutfitStudio ${BSOS_OUTFIT_STUDIO_SOURCES})
 add_executable(BodySlide ${BSOS_BODYSLIDE_SOURCES})
 
@@ -446,6 +467,13 @@ endfunction()
 
 bsos_configure_target(OutfitStudio)
 bsos_configure_target(BodySlide)
+
+if(BSOS_HAVE_GTK3)
+	target_compile_definitions(BodySlide PRIVATE BSOS_HAVE_GTK3)
+	target_include_directories(BodySlide SYSTEM PRIVATE ${GTK3_INCLUDE_DIRS})
+	target_link_libraries(BodySlide PRIVATE ${GTK3_LIBRARIES})
+	target_link_directories(BodySlide PRIVATE ${GTK3_LIBRARY_DIRS})
+endif()
 
 target_include_directories(OutfitStudio PRIVATE ${BSOS_OUTFIT_STUDIO_INCLUDE_DIRS})
 
