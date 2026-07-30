@@ -4159,9 +4159,34 @@ int BodySlideApp::BuildListBodies(
 	std::mutex batchBuildMutex;
 	std::mutex outputDirectoryMutex;
 
+	// Worker threads must not touch the progress dialog: GTK only allows GUI
+	// calls from the main thread. They publish progress here instead and the
+	// main thread applies it in flushProgress().
+	bool hasPendingProgress = false;
+	int pendingProgressValue = 0;
+	wxString pendingProgressMsg;
+
 	auto recordFailure = [&](const std::string& outfit, const auto& message) {
 		std::lock_guard<std::mutex> lock(batchBuildMutex);
 		failedOutfitsCon[outfit] = message;
+	};
+
+	auto flushProgress = [&]() {
+		bool update = false;
+		int value = 0;
+		wxString msg;
+		{
+			std::lock_guard<std::mutex> lock(batchBuildMutex);
+			update = hasPendingProgress;
+			value = pendingProgressValue;
+			msg = pendingProgressMsg;
+			hasPendingProgress = false;
+		}
+
+		if (update) {
+			progWnd.Update(value, msg);
+			progWnd.Fit();
+		}
 	};
 
 	auto outputDirectoryExists = [](const wxString& dir) {
@@ -4189,8 +4214,9 @@ int BodySlideApp::BuildListBodies(
 		wxString progMsg = wxString::Format(_("Processing '%s' (%d of %d)..."), wxString::FromUTF8(outfit), processedCount, (int)outfitList.size());
 		{
 			std::lock_guard<std::mutex> lock(batchBuildMutex);
-			progWnd.Update((int)(processedCount * progstep) - 1, progMsg);
-			progWnd.Fit();
+			pendingProgressValue = (int)(processedCount * progstep) - 1;
+			pendingProgressMsg = progMsg;
+			hasPendingProgress = true;
 			wxLogMessage(progMsg);
 		}
 
@@ -4661,15 +4687,19 @@ int BodySlideApp::BuildListBodies(
 		});
 
 		while (!buildDone) {
+			flushProgress();
 			Yield();
 			wxMilliSleep(100);
 		}
 
 		buildTask.join();
+		flushProgress();
 	}
 	else {
-		for (auto& outfit : outfitList)
+		for (auto& outfit : outfitList) {
 			buildOutfit(outfit);
+			flushProgress();
+		}
 	}
 
 	progWnd.Update(1000);
