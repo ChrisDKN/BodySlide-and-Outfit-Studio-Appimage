@@ -492,6 +492,11 @@ private:
 	void OnEnterClose(wxKeyEvent& event);
 
 	void OnEnterSliderWindow(wxMouseEvent& event);
+
+	/// Focuses the slider panel without moving the view. GTK scrolls a scrolled
+	/// window back to the top when the panel itself takes the focus.
+	void FocusSliderScroll();
+
 	wxString FavoriteChoiceLabel(const std::string& name, bool favorite) const;
 	int FindChoiceName(const std::vector<std::string>& names, const std::string& selectItem) const;
 	void SetFavoriteButtonBitmap(wxButton* button, bool favorite) const;

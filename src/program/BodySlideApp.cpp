@@ -5095,14 +5095,34 @@ void BodySlideFrame::OnEnterClose(wxKeyEvent& event) {
 	event.Skip();
 }
 
-void BodySlideFrame::OnEnterSliderWindow(wxMouseEvent& event) {
-	if (this->IsActive()) {
-		if (!this->FindFocus()->IsKindOf(wxClassInfo::FindClass("wxTextCtrl")) &&
-			!this->FindFocus()->IsKindOf(wxClassInfo::FindClass("wxSearchCtrl"))) {
-			wxScrolledWindow* sw = (wxScrolledWindow*)event.GetEventObject();
-			sw->SetFocusIgnoringChildren();
-		}
-	}
+void BodySlideFrame::OnEnterSliderWindow(wxMouseEvent& WXUNUSED(event)) {
+	if (!this->IsActive())
+		return;
+
+	wxWindow* focus = this->FindFocus();
+	if (!focus || focus == sliderScroll)
+		return;
+
+	if (focus->IsKindOf(wxClassInfo::FindClass("wxTextCtrl")) || focus->IsKindOf(wxClassInfo::FindClass("wxSearchCtrl")))
+		return;
+
+	FocusSliderScroll();
+}
+
+void BodySlideFrame::FocusSliderScroll() {
+	if (!sliderScroll)
+		return;
+
+	// On GTK, handing the focus to the panel itself makes the container scroll
+	// its focus child (the whole slider canvas) into view, which lands on the
+	// top of the list. Moving the focus must not move the view, so the position
+	// from before the focus change is put back.
+	const wxPoint viewStart = sliderScroll->GetViewStart();
+
+	sliderScroll->SetFocusIgnoringChildren();
+
+	if (sliderScroll->GetViewStart() != viewStart)
+		sliderScroll->Scroll(viewStart);
 }
 
 void BodySlideFrame::HideSlider(SliderDisplay* slider) {
@@ -5484,7 +5504,7 @@ void BodySlideFrame::OnClose(wxCloseEvent& WXUNUSED(event)) {
 void BodySlideFrame::OnActivateFrame(wxActivateEvent& event) {
 	event.Skip();
 	if (event.GetActive()) {
-		sliderScroll->SetFocusIgnoringChildren();
+		FocusSliderScroll();
 	}
 }
 
