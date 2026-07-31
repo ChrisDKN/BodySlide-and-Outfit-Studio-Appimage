@@ -37,6 +37,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "../components/ClippingFixer.h"
 #include "../utils/FileSearchUtil.h"
 #include "../utils/GtkChoiceUtil.h"
+#include "../utils/GtkLogUtil.h"
 #include "../utils/ProjectUtil.h"
 #include "../utils/GameUtil.h"
 #include "../utils/StackTrace.h"
@@ -515,6 +516,9 @@ OutfitStudio::~OutfitStudio() {
 bool OutfitStudio::OnInit() {
 	if (!wxApp::OnInit())
 		return false;
+
+	// After wxApp::OnInit(), which is what gets GTK up.
+	GtkLogUtil::FilterKnownWarnings();
 
 #ifdef _DEBUG
 	std::string dataDir{wxGetCwd().ToUTF8()};

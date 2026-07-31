@@ -29,6 +29,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "../utils/ProjectUtil.h"
 #include "../utils/GameUtil.h"
 #include "../utils/GtkChoiceUtil.h"
+#include "../utils/GtkLogUtil.h"
 
 #include <algorithm>
 #include <atomic>
@@ -134,6 +135,9 @@ BodySlideApp::~BodySlideApp() {
 bool BodySlideApp::OnInit() {
 	if (!wxApp::OnInit())
 		return false;
+
+	// After wxApp::OnInit(), which is what gets GTK up.
+	GtkLogUtil::FilterKnownWarnings();
 
 #ifdef _DEBUG
 	std::string dataDir{wxGetCwd().ToUTF8()};

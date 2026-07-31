@@ -359,8 +359,8 @@ if(WIN32)
 endif()
 
 if(BSOS_HAVE_GTK3)
-	list(APPEND BSOS_BODYSLIDE_SOURCES src/utils/GtkChoiceUtil.cpp)
-	list(APPEND BSOS_OUTFIT_STUDIO_SOURCES src/utils/GtkChoiceUtil.cpp)
+	list(APPEND BSOS_BODYSLIDE_SOURCES src/utils/GtkChoiceUtil.cpp src/utils/GtkLogUtil.cpp)
+	list(APPEND BSOS_OUTFIT_STUDIO_SOURCES src/utils/GtkChoiceUtil.cpp src/utils/GtkLogUtil.cpp)
 endif()
 
 add_executable(OutfitStudio ${BSOS_OUTFIT_STUDIO_SOURCES})
