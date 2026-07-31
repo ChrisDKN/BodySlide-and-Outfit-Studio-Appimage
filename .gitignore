@@ -22,6 +22,7 @@
 *.vs
 
 /build
+/run.sh
 
 # Output of .github/appimage/make-appimage.sh when run locally
 /.github/appimage/dist
