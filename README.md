@@ -12,11 +12,81 @@ produced by the [Linux Release](.github/workflows/linux-release.yml) workflow) a
 of environment variables so a launcher or mod manager can drive the programs without the
 user having to configure anything in the GUI.
 
+### Packages
+
+Each release publishes two x86_64 artifacts. Both come out of a single deployment, so
+they bundle exactly the same libraries and behave identically once running - only the
+packaging differs:
+
+| Artifact | Use it when |
+| --- | --- |
+| `BodySlide-and-Outfit-Studio-<version>-x86_64.AppImage` | Running it yourself on a desktop. One file, nothing to extract, updatable through the published `.zsync`. |
+| `BodySlide-and-Outfit-Studio-<version>-x86_64.tar.zst` | Driving it from a mod manager, or on any host where the AppImage cannot mount itself. |
+
+Neither needs wxWidgets, GLEW or mesa installed. The bundles carry their own loader and
+glibc, so the (bleeding-edge) glibc they are built against does not become the
+compatibility floor: they run on SteamOS, Arch, Debian, Fedora and Ubuntu alike.
+
+Both bundles ship BodySlide and Outfit Studio together rather than as two packages -
+BodySlide can launch Outfit Studio, and keeping them in one bundle both halves the
+download and lets that button keep working.
+
+#### The portable tarball
+
+Prefer this one for mod managers, and for sandboxed or locked-down hosts.
+
+The AppImage mounts itself with FUSE, which is not available inside a Flatpak sandbox
+(no `/dev/fuse`, no `fusermount3`), in minimal containers, or on hosts where `/tmp` is
+mounted `noexec`. The tarball is a plain directory tree and has no such requirement.
+
+It is also the better shape to deploy outfits into: the extracted root is writable and
+doubles as the data directory, so `SliderSets/`, `ShapeData/`, `Config.xml` and the logs
+all live in one place, with no read-only mount and no writable-directory indirection.
+
+```sh
+tar --zstd -xf BodySlide-and-Outfit-Studio-*.tar.zst
+cd BodySlide-and-Outfit-Studio-*-x86_64/
+./BodySlide          # or ./OutfitStudio
+```
+
+`tar --zstd` needs the `zstd` program on `PATH`; without it, use
+`zstd -dc BodySlide-and-Outfit-Studio-*.tar.zst | tar -x` instead.
+
+The extracted directory looks like this:
+
+```
+BodySlide-and-Outfit-Studio-<version>-x86_64/
+├── BodySlide             launcher script - start here
+├── OutfitStudio          launcher script
+├── bin/                  the real executables, plus bundled helpers
+├── res/  lang/           shaders, XRC layouts, reference meshes, translations
+├── Config.xml  ...       the five XML config files, seeded from the defaults
+└── (bundled libraries)
+```
+
+Start the programs through the two launcher scripts at the root, not the binaries in
+`bin/` - the launchers are what set up `BSOS_APPDIR`, `BSOS_BINDIR` and `PATH` for the
+bundle. They resolve their own location through symlinks, so a symlink from
+`~/.local/bin/BodySlide` works, and the whole tree is relocatable: move it anywhere, or
+copy it to another machine, and it still runs.
+
+The tarball deliberately ships **without** empty `SliderSets`/`ShapeData` directories.
+See [A note on project discovery](#a-note-on-project-discovery) below before creating
+them - their presence changes where outfits are looked for.
+
+#### If the AppImage will not start
+
+Run it with `--appimage-extract-and-run` (or set `URUNTIME_EXTRACT_AND_RUN=1`). That
+skips the FUSE mount and unpacks to a temporary directory instead, at the cost of a
+slower start. If that also fails, the host most likely has `/tmp` mounted `noexec` or the
+AppImage sits on a filesystem that cannot carry the executable bit (NTFS, exFAT) - use
+the tarball.
+
 ### Environment variables
 
 | Variable | Purpose |
 | --- | --- |
-| `BSOS_APPDIR` | Data directory: `Config.xml`, `Log_BS.txt` / `Log_OS.txt`, `res/`, `lang/`, and - when it contains a `SliderSets` directory - the project data. Defaults to the directory holding the executable; the AppImage defaults it to `${XDG_DATA_HOME:-~/.local/share}/BodySlide` because its own directory is a read-only mount. |
+| `BSOS_APPDIR` | Data directory: `Config.xml`, `Log_BS.txt` / `Log_OS.txt`, `res/`, `lang/`, and - when it contains a `SliderSets` directory - the project data. Defaults to the directory holding the executable, which is what the tarball launchers use (the extracted root); the AppImage defaults it to `${XDG_DATA_HOME:-~/.local/share}/BodySlide` instead, because its own directory is a read-only mount. |
 | `BSOS_BINDIR` | Directory to launch sibling executables from, used by BodySlide's "Outfit Studio" button. Set this when the data directory holds no executables (AppImage) or when the programs must be started through a wrapper rather than as raw ELF binaries. Defaults to the executable's own directory. |
 | `BSOS_TARGET_GAME` | Game to target. Accepts a name from the list below (case-insensitive) or the raw index. An unrecognised value is logged as a warning and ignored, rather than silently selecting the wrong game. |
 | `BSOS_GAME_DATA_PATH` | The game's `Data` directory. Also written to the per-game slot the settings dialog keeps, so switching game in the UI and back does not lose it. |
@@ -58,6 +128,13 @@ the first argument, or symlink/rename the AppImage to `OutfitStudio`:
 ```sh
 ./BodySlide-and-Outfit-Studio-*.AppImage --outfit-studio
 ```
+
+The examples use the AppImage, but the variables work the same way for the tarball -
+substitute `./BodySlide` for the AppImage in each one. The tarball has no
+`--outfit-studio` argument because it does not need one: run `./OutfitStudio` directly.
+Note that its `BSOS_APPDIR` defaults to the extracted directory rather than
+`~/.local/share/BodySlide`, so the two-instance example above is what you want if you
+run one shared install against several games.
 
 ### A note on project discovery
 
