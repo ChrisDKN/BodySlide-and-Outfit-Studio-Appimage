@@ -30,6 +30,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "../utils/GameUtil.h"
 #include "../utils/GtkChoiceUtil.h"
 #include "../utils/GtkLogUtil.h"
+#include "../utils/WxScrollUtil.h"
 
 #include <algorithm>
 #include <atomic>
@@ -6940,6 +6941,7 @@ bool SliderDisplay::Create(wxScrolledWindow* scrollWindow,
 	sliderLo = new wxSlider(scrollWindow, wxID_ANY, 0, minValue, maxValue, wxDefaultPosition, wxDefaultSize, wxSL_BOTTOM | wxSL_HORIZONTAL);
 	sliderLo->SetTickFreq(5);
 	sliderLo->SetName(nameStr + "|LO");
+	WxScrollUtil::RedirectMouseWheelToScrollParent(sliderLo);
 	sliderLo->Show(!oneSize && !isZap);
 
 	if (!oneSize && !isZap)
@@ -6967,6 +6969,7 @@ bool SliderDisplay::Create(wxScrolledWindow* scrollWindow,
 	sliderHi = new wxSlider(scrollWindow, wxID_ANY, 0, minValue, maxValue, wxDefaultPosition, wxDefaultSize, wxSL_HORIZONTAL);
 	sliderHi->SetTickFreq(5);
 	sliderHi->SetName(nameStr + "|HI");
+	WxScrollUtil::RedirectMouseWheelToScrollParent(sliderHi);
 	sliderHi->Show(!isZap);
 
 	if (!isZap)

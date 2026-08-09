@@ -5,6 +5,8 @@ See the included LICENSE file
 
 #include "wxSliderPanel.h"
 
+#include "../utils/WxScrollUtil.h"
+
 IMPLEMENT_DYNAMIC_CLASS(wxSliderPanel, wxWindow)
 
 BEGIN_EVENT_TABLE(wxSliderPanel, wxWindow)
@@ -99,6 +101,7 @@ bool wxSliderPanel::Create(wxWindow* parent, const wxString& name, int sliderMin
 	slider->Create(this, wxID_ANY, 0, sliderMin, sliderMax, wxDefaultPosition, wxSize(-1, -1), wxSL_HORIZONTAL, wxDefaultValidator, name + "|slider");
 	slider->SetMinSize(FromDIP(wxSize(-1, 20)));
 	slider->SetMaxSize(FromDIP(wxSize(-1, 20)));
+	WxScrollUtil::RedirectMouseWheelToScrollParent(slider);
 
 	sizer->Add(slider, 1, wxLEFT | wxRIGHT | wxEXPAND, 5);
 

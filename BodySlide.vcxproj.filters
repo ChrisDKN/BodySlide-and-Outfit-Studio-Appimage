@@ -790,6 +790,9 @@
     <ClInclude Include="src\utils\StringStuff.h">
       <Filter>Utilities</Filter>
     </ClInclude>
+    <ClInclude Include="src\utils\WxScrollUtil.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
     <ClInclude Include="src\files\wxDDSImage.h">
       <Filter>Files</Filter>
     </ClInclude>

@@ -1468,6 +1468,9 @@
     <ClInclude Include="src\utils\ConfigDialogUtil.h">
       <Filter>Utilities</Filter>
     </ClInclude>
+    <ClInclude Include="src\utils\WxScrollUtil.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
     <ClInclude Include="src\program\SliderDataImportDialog.h">
       <Filter>Program</Filter>
     </ClInclude>
