@@ -5,9 +5,11 @@ See the included LICENSE file
 
 #include "GLSurface.h"
 #include "../utils/ConfigurationManager.h"
+#include "../utils/Log.h"
 
 #include <wx/log.h>
 #include <wx/msgdlg.h>
+#include <wx/utils.h>
 
 #include <algorithm>
 #include <cfloat>
@@ -39,41 +41,43 @@ const wxGLAttributes& GLSurface::GetGLAttribs() {
 	static wxGLAttributes attribs;
 
 	if (!attribsInitialized) {
-		// 16x AA
-		attribs.PlatformDefaults().DoubleBuffer().RGBA().Depth(24).SampleBuffers(1).Samplers(16).EndList();
-
-		bool displaySupported = wxGLCanvas::IsDisplaySupported(attribs);
-		if (!displaySupported) {
-			wxLogWarning("OpenGL attributes with 16x AA not supported. Trying out different ones...");
-			attribs.Reset();
-
-			// 8x AA
-			attribs.PlatformDefaults().DoubleBuffer().RGBA().Depth(24).SampleBuffers(1).Samplers(8).EndList();
-			displaySupported = wxGLCanvas::IsDisplaySupported(attribs);
+		const auto validSamples = [](long samples) {
+			return samples == 0 || samples == 2 || samples == 4 || samples == 8 || samples == 16;
+		};
+		long maxSamples = 16;
+		const wxString configuredSamples = wxString::FromUTF8(Config["Rendering/MSAASamples"]);
+		if (!configuredSamples.empty() && (!configuredSamples.ToLong(&maxSamples) || !validSamples(maxSamples))) {
+			wxLogWarning("Invalid Rendering/MSAASamples value; using 16.");
+			maxSamples = 16;
+		}
+		wxString overrideValue;
+		if (wxGetEnv("BSOS_MSAA", &overrideValue)) {
+			long samples;
+			if (overrideValue.ToLong(&samples) && validSamples(samples))
+				maxSamples = samples;
+			else
+				wxLogWarning("Invalid BSOS_MSAA value '%s'; expected 0, 2, 4, 8 or 16.", overrideValue);
 		}
 
-		if (!displaySupported) {
-			wxLogWarning("OpenGL attributes with 8x AA not supported. Trying out different ones...");
+		bool displaySupported = false;
+		for (int samples : {16, 8, 4, 2, 0}) {
+			if (samples > maxSamples)
+				continue;
 			attribs.Reset();
-
-			// 4x AA
-			attribs.PlatformDefaults().DoubleBuffer().RGBA().Depth(24).SampleBuffers(1).Samplers(4).EndList();
+			attribs.PlatformDefaults().DoubleBuffer().RGBA().Depth(24).SampleBuffers(samples ? 1 : 0);
+			if (samples)
+				attribs.Samplers(samples);
+			attribs.EndList();
 			displaySupported = wxGLCanvas::IsDisplaySupported(attribs);
-		}
-
-		if (!displaySupported) {
-			wxLogWarning("OpenGL attributes with 4x AA not supported. Trying out different ones...");
-			attribs.Reset();
-
-			// No AA
-			attribs.PlatformDefaults().DoubleBuffer().RGBA().Depth(24).SampleBuffers(0).EndList();
-			displaySupported = wxGLCanvas::IsDisplaySupported(attribs);
+			if (displaySupported) {
+				wxLogMessage("OpenGL attributes selected: %d MSAA samples (requested maximum %ld).", samples, maxSamples);
+				break;
+			}
+			wxLogWarning("OpenGL attributes with %d MSAA samples not supported.", samples);
 		}
 
 		if (!displaySupported)
 			wxLogWarning("No supported OpenGL attributes could be found!");
-		else
-			wxLogMessage("OpenGL attributes are supported.");
 
 		attribsInitialized = true;
 	}
@@ -121,6 +125,9 @@ int GLSurface::Initialize(wxGLCanvas* can, wxGLContext* ctx) {
 	wxLogMessage(wxString::Format("-> Vendor:   '%s'", wxString(glGetString(GL_VENDOR))));
 	wxLogMessage(wxString::Format("-> Renderer: '%s'", wxString(glGetString(GL_RENDERER))));
 	wxLogMessage(wxString::Format("-> Version:  '%s'", wxString(glGetString(GL_VERSION))));
+	GLint samples = 0;
+	glGetIntegerv(GL_SAMPLES, &samples);
+	wxLogMessage("-> MSAA samples: %d", samples);
 
 	InitGLExtensions();
 	return InitGLSettings();
@@ -833,7 +840,9 @@ void GLSurface::RenderOneFrame() {
 	if (!canvas)
 		return;
 
+	PerformanceTimer timing("OpenGL frame");
 	canvas->SetCurrent(*context);
+	timing.Mark("make current");
 
 	glClearColor(colorBackground.x, colorBackground.y, colorBackground.z, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -879,7 +888,9 @@ void GLSurface::RenderOneFrame() {
 		}
 	}
 
+	timing.Mark("draw submission");
 	canvas->SwapBuffers();
+	timing.Mark("swap buffers");
 	return;
 }
 

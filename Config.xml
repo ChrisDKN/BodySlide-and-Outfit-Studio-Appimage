@@ -54,6 +54,7 @@
         <Directional2 x="0" y="20" z="-100">85</Directional2></Lights>
     <!--Rendering Settings-->
     <Rendering>
+        <MSAASamples>16</MSAASamples>
         <ColorBackground r="160" g="160" b="160"></ColorBackground>
         <!-- Vertex point sizes (in logical pixels) for the vertex edit mode in Outfit Studio. -->
         <PointSizeMin>4.0</PointSizeMin>

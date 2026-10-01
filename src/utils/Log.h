@@ -5,6 +5,7 @@ See the included LICENSE file
 
 #pragma once
 
+#include <chrono>
 #include <fstream>
 #include <wx/datetime.h>
 #include <wx/log.h>
@@ -47,4 +48,17 @@ public:
 
 	//Swaps out log formatter
 	void SetFormatter(bool withFile = true);
+};
+
+class PerformanceTimer {
+	using Clock = std::chrono::steady_clock;
+	const char* operation;
+	bool enabled;
+	Clock::time_point started;
+	Clock::time_point previous;
+
+public:
+	explicit PerformanceTimer(const char* operation);
+	~PerformanceTimer();
+	void Mark(const char* stage);
 };

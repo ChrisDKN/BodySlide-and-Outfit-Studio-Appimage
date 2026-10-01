@@ -8,6 +8,32 @@ See the included LICENSE file
 #include <filesystem>
 #include <wx/utils.h>
 
+PerformanceTimer::PerformanceTimer(const char* operation) : operation(operation) {
+	static const bool diagnostics = [] {
+		wxString value;
+		return wxGetEnv("BSOS_DIAGNOSTICS", &value) && value == "1";
+	}();
+	enabled = diagnostics;
+	if (enabled)
+		started = previous = Clock::now();
+}
+
+PerformanceTimer::~PerformanceTimer() {
+	if (enabled) {
+		const double elapsed = std::chrono::duration<double, std::milli>(Clock::now() - started).count();
+		wxLogMessage("Performance: %s total %.1f ms", operation, elapsed);
+	}
+}
+
+void PerformanceTimer::Mark(const char* stage) {
+	if (enabled) {
+		const auto now = Clock::now();
+		const double elapsed = std::chrono::duration<double, std::milli>(now - previous).count();
+		wxLogMessage("Performance: %s / %s %.1f ms", operation, stage, elapsed);
+		previous = Clock::now();
+	}
+}
+
 /*
 <LogLevel>
 -1: Off

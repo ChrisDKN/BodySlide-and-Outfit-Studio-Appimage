@@ -91,6 +91,8 @@ the tarball.
 | `BSOS_TARGET_GAME` | Game to target. Accepts a name from the list below (case-insensitive) or the raw index. An unrecognised value is logged as a warning and ignored, rather than silently selecting the wrong game. |
 | `BSOS_GAME_DATA_PATH` | The game's `Data` directory. Also written to the per-game slot the settings dialog keeps, so switching game in the UI and back does not lose it. |
 | `BSOS_OUTPUT_DATA_PATH` | Where built meshes are written. Defaults to `BSOS_GAME_DATA_PATH`; set it separately to capture build output into a mod folder instead of dropping it into the game. |
+| `BSOS_MSAA` | Maximum preview antialiasing samples: `0` (off), `2`, `4`, `8`, or `16`. Overrides `Rendering/MSAASamples` in `Config.xml` for this launch. Defaults to `16`; unsupported levels fall back to lower ones. Restart both programs after changing it. |
+| `BSOS_DIAGNOSTICS` | Set to `1` to log selection, preview-loading, and rendering timings to `Log_BS.txt` / `Log_OS.txt`. Requires `LogLevel` set to `3` in `Config.xml`. Leave unset for normal use. |
 
 Valid `BSOS_TARGET_GAME` names (index in parentheses): `Fallout3` (0),
 `FalloutNewVegas` (1), `Skyrim` (2), `Fallout4` (3), `SkyrimSpecialEdition` (4),
@@ -135,6 +137,31 @@ substitute `./BodySlide` for the AppImage in each one. The tarball has no
 Note that its `BSOS_APPDIR` defaults to the extracted directory rather than
 `~/.local/share/BodySlide`, so the two-instance example above is what you want if you
 run one shared install against several games.
+
+When given a separate `BSOS_APPDIR`, the tarball launcher creates it, links `res/` and
+`lang/` to the bundle, and copies missing XML configuration files from the bundle root.
+Existing configuration files and real resource directories are preserved.
+
+### Diagnosing slow selections or previews on Linux
+
+Enable timings for a run that reproduces the slowdown:
+
+```sh
+BSOS_DIAGNOSTICS=1 ./BodySlide
+# Or: BSOS_DIAGNOSTICS=1 ./OutfitStudio
+```
+
+Collect `Log_BS.txt` / `Log_OS.txt` from `BSOS_APPDIR`. They include the OpenGL vendor,
+renderer and version once the preview is initialized. The timing entries distinguish
+selection work, waiting for a preview load, drawing, and swapping buffers. Drawing
+timings measure CPU submission and driver waits, not GPU execution time.
+
+Compare separate runs with the preview closed, with `BSOS_MSAA=0`, and with
+`GDK_BACKEND=x11` (where X11 or XWayland is available). Keep the same project and
+other settings for each comparison. These variables can also prefix an AppImage
+launch. Report the bundle version, GPU, display session, and whether it was launched
+inside a Flatpak sandbox along with the logs; timings alone do not establish a
+graphics-driver problem.
 
 ### A note on project discovery
 

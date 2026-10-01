@@ -2949,6 +2949,7 @@ void OutfitStudioFrame::ShowSliderEffect(const std::string& sliderName, bool sho
 }
 
 void OutfitStudioFrame::UpdateActiveShape() {
+	PerformanceTimer timing("Outfit Studio shape selection");
 	bool smoothSeamNormals = true;
 	bool lockNormals = false;
 	bool enableSmoothSeamsAngle = true;
@@ -2990,6 +2991,7 @@ void OutfitStudioFrame::UpdateActiveShape() {
 		CreatePartitionTree(activeItem->GetShape());
 	}
 
+	timing.Mark("selection controls");
 	if (!smoothSeamNormals)
 		enableSmoothSeamsAngle = false;
 
@@ -3003,11 +3005,14 @@ void OutfitStudioFrame::UpdateActiveShape() {
 		glView->gls.camRotOffset = glView->gls.GetActiveCenter();
 
 	glView->UpdateBones();
+	timing.Mark("update bones and framing");
 	glView->Render();
+	timing.Mark("render");
 
 	HighlightSliderData();
 	HighlightBoneNamesWithWeights();
 	UpdateBoneCounts();
+	timing.Mark("highlight sliders and bones");
 }
 
 void OutfitStudioFrame::UpdateVertexColors() {

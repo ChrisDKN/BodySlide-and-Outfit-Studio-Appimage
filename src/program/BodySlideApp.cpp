@@ -869,6 +869,7 @@ int BodySlideApp::LoadSliderSets() {
 }
 
 void BodySlideApp::ActivateOutfit(const std::string& outfitName) {
+	PerformanceTimer timing("BodySlide outfit selection");
 	wxLogMessage("Activating set '%s'...", outfitName);
 
 	BodySlideConfig.SetValue("SelectedOutfit", outfitName);
@@ -878,6 +879,7 @@ void BodySlideApp::ActivateOutfit(const std::string& outfitName) {
 	sliderView->ClearSliderGUI();
 
 	CleanupPreview();
+	timing.Mark("clear controls and preview");
 
 	std::string activePreset = BodySlideConfig["SelectedPreset"];
 
@@ -885,16 +887,21 @@ void BodySlideApp::ActivateOutfit(const std::string& outfitName) {
 	SetPresetGroups(outfitName);
 	LoadPresets(outfitName);
 	PopulatePresetList(activePreset);
+	timing.Mark("load presets");
 
 	int error = CreateSetSliders(outfitName);
 	if (error)
 		wxLogError("Failed to load set '%s' from slider set list (%d).", outfitName, error);
+	timing.Mark("create sliders");
 
 	PopulateOutfitList(outfitName);
+	timing.Mark("populate outfits");
 
 	ActivatePreset(activePreset, false);
+	timing.Mark("apply preset");
 
 	InitPreview();
+	timing.Mark("start preview");
 
 	sliderView->Layout();
 	sliderView->Refresh();
@@ -903,6 +910,7 @@ void BodySlideApp::ActivateOutfit(const std::string& outfitName) {
 }
 
 void BodySlideApp::ActivatePreset(const std::string& presetName, const bool updatePreview) {
+	PerformanceTimer timing("BodySlide preset selection");
 	wxLogMessage("Applying preset '%s' to sliders.", presetName);
 
 	BodySlideConfig.SetValue("SelectedPreset", presetName);
@@ -1458,7 +1466,7 @@ bool BodySlideApp::WriteMorphTRI(const std::string& triPath, SliderSet& sliderSe
 		}
 	}
 
-	if (!tri.Write(triFilePath))
+	if (!tri.Write(PlatformUtil::ResolveCaseInsensitivePath(triFilePath)))
 		return false;
 
 	return true;
@@ -1613,9 +1621,15 @@ bool BodySlideApp::WriteSFMorphFile(const std::string& morphFolder, SliderSet& s
 
 	wxLogMessage("Writing %zu morph(s) for shape '%s'...", morphFile.morphOffsetsCache.size(), targetShapeName);
 
-	wxFileName::Mkdir(wxString::FromUTF8(morphFolder), wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
+	static std::mutex morphDirectoryMutex;
+	std::string outputFolder;
+	{
+		std::lock_guard<std::mutex> lock(morphDirectoryMutex);
+		outputFolder = PlatformUtil::ResolveExistingPathPrefix(morphFolder);
+		wxFileName::Mkdir(wxString::FromUTF8(outputFolder), wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
+	}
 
-	std::string shapeFilePath = morphFolder + PathSepStr + "morph.dat";
+	std::string shapeFilePath = PlatformUtil::ResolveCaseInsensitivePath(outputFolder + PathSepStr + "morph.dat");
 
 	morphFile.CacheToFileData();
 
@@ -1880,6 +1894,7 @@ void BodySlideApp::InitPreview() {
 	PreviewPanel* targetPreview = preview;
 
 	previewLoadThread = std::thread([this, gen, projectInfos, extraNifPaths, isMultiProject, targetPreview]() {
+		PerformanceTimer timing("BodySlide preview worker");
 		struct ProjectResult {
 			size_t index;
 			nifly::NifFile* baseNif = nullptr;
@@ -1913,9 +1928,11 @@ void BodySlideApp::InitPreview() {
 			}
 
 			result.modNif.CopyFrom(*result.baseNif);
+			timing.Mark("load and copy NIF");
 
 			DiffDataSets dataSets;
 			info.sliderSetCopy.LoadSetDiffData(dataSets);
+			timing.Mark("load morph data");
 
 			// Build preview mesh (apply sliders, zap verts)
 			bool keepZappedShapes = info.sliderSetCopy.KeepZappedShapes();
@@ -1944,6 +1961,7 @@ void BodySlideApp::InitPreview() {
 				}
 			}
 			result.loaded = true;
+			timing.Mark("apply sliders and zaps");
 		}
 
 		if (previewLoadGeneration.load() != gen) {
@@ -1953,6 +1971,7 @@ void BodySlideApp::InitPreview() {
 		}
 
 		CallAfter([this, gen, targetPreview, results = std::move(results), projectInfos, extraNifPaths, isMultiProject]() mutable {
+			PerformanceTimer timing("BodySlide preview completion");
 			if (previewLoadGeneration.load() != gen) {
 				for (auto& r : results)
 					delete r.baseNif;
@@ -1997,6 +2016,7 @@ void BodySlideApp::InitPreview() {
 					preview->AddNifShapeTextures(&pp->modNif, s);
 
 				UpdateMeshesFromSet(pp->sliderSet);
+				timing.Mark("load morphs, meshes and textures");
 			}
 
 			if (!isMultiProject)
@@ -2476,10 +2496,12 @@ void BodySlideApp::CleanupPreview() {
 	if (!preview)
 		return;
 
+	PerformanceTimer timing("BodySlide preview cleanup");
 	// Cancel async load and wait for it to finish
 	++previewLoadGeneration;
 	if (previewLoadThread.joinable())
 		previewLoadThread.join();
+	timing.Mark("wait for preview worker");
 	previewLoading = false;
 
 	preview->Cleanup();
@@ -3451,7 +3473,8 @@ int BodySlideApp::BuildBodies(bool localPath, bool clean, bool tri, bool forceNo
 		else
 			removeHigh = outFileNameSmall + ".nif";
 
-		bool remHigh = wxRemoveFile(wxString::FromUTF8(removeHigh));
+		removeHigh = wxString::FromUTF8(PlatformUtil::ResolveCaseInsensitivePath(removeHigh.ToUTF8().data()));
+		bool remHigh = wxRemoveFile(removeHigh);
 		if (remHigh)
 			msg.Append(removeHigh + "\n");
 		else
@@ -3463,8 +3486,8 @@ int BodySlideApp::BuildBodies(bool localPath, bool clean, bool tri, bool forceNo
 			return 0;
 		}
 
-		removeLow = outFileNameSmall + "_0.nif";
-		bool remLow = wxRemoveFile(wxString::FromUTF8(removeLow));
+		removeLow = wxString::FromUTF8(PlatformUtil::ResolveCaseInsensitivePath(outFileNameSmall + "_0.nif"));
+		bool remLow = wxRemoveFile(removeLow);
 		if (remLow)
 			msg.Append(removeLow + "\n");
 		else
@@ -3665,7 +3688,7 @@ int BodySlideApp::BuildBodies(bool localPath, bool clean, bool tri, bool forceNo
 	}
 	else {
 		if (tri && !triKeep) {
-			std::string triFilePath = outFileNameBig + ".tri";
+			std::string triFilePath = PlatformUtil::ResolveCaseInsensitivePath(outFileNameBig + ".tri");
 
 			// TRI file already exists but isn't a body TRI file, don't overwrite!
 			if (wxFileName::FileExists(wxString::FromUTF8(triFilePath)) && !IsBodyTriFile(triFilePath))
@@ -3716,7 +3739,7 @@ int BodySlideApp::BuildBodies(bool localPath, bool clean, bool tri, bool forceNo
 			}
 		}
 		else if (!triKeep) {
-			wxString triPath = wxString::FromUTF8(outFileNameBig + ".tri");
+			wxString triPath = wxString::FromUTF8(PlatformUtil::ResolveCaseInsensitivePath(outFileNameBig + ".tri"));
 			if (IsBodyTriFile(triPath.ToUTF8().data()))
 				wxRemoveFile(triPath);
 		}
@@ -3731,8 +3754,8 @@ int BodySlideApp::BuildBodies(bool localPath, bool clean, bool tri, bool forceNo
 	nifOptions.optimize = false;
 
 	if (activeSet.GenWeights()) {
-		outFileNameSmall += "_0.nif";
-		outFileNameBig += "_1.nif";
+		outFileNameSmall = PlatformUtil::ResolveCaseInsensitivePath(outFileNameSmall + "_0.nif");
+		outFileNameBig = PlatformUtil::ResolveCaseInsensitivePath(outFileNameBig + "_1.nif");
 		custName = wxString::FromUTF8(outFileNameSmall);
 		savedLow = custName;
 
@@ -3755,14 +3778,18 @@ int BodySlideApp::BuildBodies(bool localPath, bool clean, bool tri, bool forceNo
 			PlatformUtil::OpenFileStream(fileSmall, custName.ToUTF8().data(), std::ios::out | std::ios::binary);
 		}
 
-		wxString custEnd;
-		if (custName.EndsWith("_0.nif", &custEnd))
-			custName = custEnd + "_1.nif";
+		if (useCustName) {
+			wxString custEnd;
+			if (custName.EndsWith("_0.nif", &custEnd))
+				custName = custEnd + "_1.nif";
+			else
+				custName.Empty();
+		}
 		else
-			custName.Empty();
+			custName = wxString::FromUTF8(outFileNameBig);
 	}
 	else {
-		outFileNameBig += ".nif";
+		outFileNameBig = PlatformUtil::ResolveCaseInsensitivePath(outFileNameBig + ".nif");
 		custName = wxString::FromUTF8(outFileNameBig);
 	}
 
@@ -4207,11 +4234,10 @@ int BodySlideApp::BuildListBodies(
 		return dirName.DirExists();
 	};
 
-	auto ensureOutputDirectory = [&](const wxString& dir) {
-		if (outputDirectoryExists(dir))
-			return true;
-
+	auto ensureOutputDirectory = [&](std::string& outputDir) {
 		std::lock_guard<std::mutex> lock(outputDirectoryMutex);
+		outputDir = PlatformUtil::ResolveExistingPathPrefix(outputDir);
+		const wxString dir = wxString::FromUTF8(outputDir);
 		if (outputDirectoryExists(dir))
 			return true;
 
@@ -4574,16 +4600,11 @@ int BodySlideApp::BuildListBodies(
 		currentDiffs.Clear();
 
 		/* Create directory for the outfit */
-		// Matched against what is already on disk: an .osp saying "Meshes\Armor"
-		// must build into an existing "meshes/armor" instead of raising a second
-		// tree beside it that differs only in case. The file name itself keeps
-		// the spelling the set asked for.
-		const std::string outputDir = PlatformUtil::ResolveExistingPathPrefix(datapath + currentSet.GetOutputPath());
-		wxString dir = wxString::FromUTF8(outputDir);
-		bool success = ensureOutputDirectory(dir);
+		std::string outputDir = datapath + currentSet.GetOutputPath();
+		bool success = ensureOutputDirectory(outputDir);
 
 		if (!success) {
-			recordFailure(outfit, _("Unable to create destination directory: ") + dir.ToUTF8().data());
+			recordFailure(outfit, _("Unable to create destination directory: ") + wxString::FromUTF8(outputDir));
 			return;
 		}
 
@@ -4603,7 +4624,7 @@ int BodySlideApp::BuildListBodies(
 		}
 		else {
 			if (tri && !triKeep) {
-				std::string triFilePath = outFileNameBig + ".tri";
+				std::string triFilePath = PlatformUtil::ResolveCaseInsensitivePath(outFileNameBig + ".tri");
 
 				// TRI file already exists but isn't a body TRI file, don't overwrite!
 				if (wxFileName::FileExists(wxString::FromUTF8(triFilePath)) && !IsBodyTriFile(triFilePath))
@@ -4653,7 +4674,7 @@ int BodySlideApp::BuildListBodies(
 				}
 			}
 			else if (!triKeep) {
-				std::string triPath = outFileNameBig + ".tri";
+				std::string triPath = PlatformUtil::ResolveCaseInsensitivePath(outFileNameBig + ".tri");
 				if (IsBodyTriFile(triPath))
 					wxRemoveFile(triPath);
 			}
@@ -4664,8 +4685,8 @@ int BodySlideApp::BuildListBodies(
 
 		/* Set filenames for the outfit */
 		if (currentSet.GenWeights()) {
-			outFileNameSmall += "_0.nif";
-			outFileNameBig += "_1.nif";
+			outFileNameSmall = PlatformUtil::ResolveCaseInsensitivePath(outFileNameSmall + "_0.nif");
+			outFileNameBig = PlatformUtil::ResolveCaseInsensitivePath(outFileNameBig + "_1.nif");
 
 			std::fstream fileBig;
 			PlatformUtil::OpenFileStream(fileBig, outFileNameBig, std::ios::out | std::ios::binary);
@@ -4684,7 +4705,7 @@ int BodySlideApp::BuildListBodies(
 			}
 		}
 		else {
-			outFileNameBig += ".nif";
+			outFileNameBig = PlatformUtil::ResolveCaseInsensitivePath(outFileNameBig + ".nif");
 
 			std::fstream fileBig;
 			PlatformUtil::OpenFileStream(fileBig, outFileNameBig, std::ios::out | std::ios::binary);

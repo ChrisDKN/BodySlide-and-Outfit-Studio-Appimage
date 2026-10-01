@@ -29,12 +29,22 @@ std::string ToLowerAscii(const std::string& s) {
 	return result;
 }
 
-// Directory listings, keyed by directory, mapping lowercased entry name to the
-// real one. Populated lazily and never invalidated: every lookup tries the exact
-// path first, so a file created after a directory was cached is still found by
-// its real name. Only a case-mismatched lookup of a just-created file could go
-// stale, which does not happen in practice.
-std::map<std::string, std::map<std::string, std::string>> g_dirEntryCache;
+struct DirectoryEntries {
+	struct stat metadata;
+	std::map<std::string, std::string> names;
+};
+
+bool SameDirectory(const struct stat& a, const struct stat& b) {
+	if (a.st_dev != b.st_dev || a.st_ino != b.st_ino || a.st_mtime != b.st_mtime || a.st_ctime != b.st_ctime)
+		return false;
+#ifdef __APPLE__
+	return a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec && a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec;
+#else
+	return a.st_mtim.tv_nsec == b.st_mtim.tv_nsec && a.st_ctim.tv_nsec == b.st_ctim.tv_nsec;
+#endif
+}
+
+std::map<std::string, DirectoryEntries> g_dirEntryCache;
 std::mutex g_dirEntryCacheMutex;
 
 // Real name of `wanted` within `dir` ignoring case, or empty if there is none.
@@ -43,28 +53,43 @@ std::string MatchEntryIgnoringCase(const std::string& dir, const std::string& wa
 
 	std::lock_guard<std::mutex> lock(g_dirEntryCacheMutex);
 
-	auto cached = g_dirEntryCache.find(dir);
-	if (cached == g_dirEntryCache.end()) {
-		std::map<std::string, std::string> entries;
-
-		if (DIR* handle = ::opendir(dir.c_str())) {
-			while (struct dirent* entry = ::readdir(handle)) {
-				const std::string name(entry->d_name);
-				if (name == "." || name == "..")
-					continue;
-
-				// First spelling wins, so the result stays stable if a directory
-				// really does hold names differing only by case.
-				entries.emplace(ToLowerAscii(name), name);
-			}
-			::closedir(handle);
-		}
-
-		cached = g_dirEntryCache.emplace(dir, std::move(entries)).first;
+	struct stat metadata;
+	if (::stat(dir.c_str(), &metadata) != 0) {
+		g_dirEntryCache.erase(dir);
+		return {};
 	}
 
-	auto match = cached->second.find(needle);
-	return match == cached->second.end() ? std::string() : match->second;
+	auto cached = g_dirEntryCache.find(dir);
+	if (cached != g_dirEntryCache.end() && SameDirectory(cached->second.metadata, metadata)) {
+		auto match = cached->second.names.find(needle);
+		if (match != cached->second.names.end() && PathExists(dir + "/" + match->second))
+			return match->second;
+	}
+
+	// Misses and stale matches must be retried even when timestamps haven't advanced.
+	DIR* handle = ::opendir(dir.c_str());
+	if (!handle) {
+		g_dirEntryCache.erase(dir);
+		return {};
+	}
+
+	DirectoryEntries entries{metadata, {}};
+	errno = 0;
+	while (struct dirent* entry = ::readdir(handle)) {
+		const std::string name(entry->d_name);
+		if (name != "." && name != "..")
+			entries.names.emplace(ToLowerAscii(name), name);
+	}
+	const int readError = errno;
+	::closedir(handle);
+	if (readError) {
+		g_dirEntryCache.erase(dir);
+		return {};
+	}
+
+	cached = g_dirEntryCache.insert_or_assign(dir, std::move(entries)).first;
+	auto match = cached->second.names.find(needle);
+	return match == cached->second.names.end() ? std::string() : match->second;
 }
 
 // Shared walker behind both public resolvers. `keepUnmatchedTail` decides what

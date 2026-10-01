@@ -20,7 +20,7 @@ while [ -L "$SELF" ]; do
 		*)  SELF=$(dirname "$SELF")/$link ;;
 	esac
 done
-ROOT=$(cd -- "$(dirname -- "$SELF")" && pwd)
+ROOT=$(cd -- "$(dirname -- "$SELF")" && pwd -P)
 
 # Unlike the AppImage, this directory is writable, so it doubles as the data
 # directory: Config.xml, SliderSets, ShapeData and the logs all live here.
@@ -30,6 +30,22 @@ if [ -z "$BSOS_APPDIR" ]; then
 	BSOS_APPDIR=$ROOT
 fi
 export BSOS_APPDIR
+
+mkdir -p "$BSOS_APPDIR"
+BSOS_APPDIR=$(cd -- "$BSOS_APPDIR" && pwd -P)
+if [ "$BSOS_APPDIR" != "$ROOT" ]; then
+	for d in res lang; do
+		if [ -L "$BSOS_APPDIR/$d" ] || [ ! -e "$BSOS_APPDIR/$d" ]; then
+			ln -sfn "$ROOT/$d" "$BSOS_APPDIR/$d"
+		fi
+	done
+	for f in Config.xml BodySlide.xml OutfitStudio.xml BuildSelection.xml RefTemplates.xml; do
+		if [ ! -e "$BSOS_APPDIR/$f" ] && [ -f "$ROOT/$f" ]; then
+			cp "$ROOT/$f" "$BSOS_APPDIR/$f"
+			chmod u+w "$BSOS_APPDIR/$f"
+		fi
+	done
+fi
 
 # Start sibling programs (BodySlide's "Outfit Studio" button) through sharun so
 # they get the bundled libraries, rather than exec'ing the raw ELF directly.
