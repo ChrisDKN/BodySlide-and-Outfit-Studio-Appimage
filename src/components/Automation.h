@@ -14,11 +14,22 @@ See the included LICENSE file
 #include <utility>
 #include <vector>
 
+// The step type table holds English category and display names. They are marked
+// with wxTRANSLATE so the catalog picks them up, and translated at display time
+// with wxGetTranslation().
+#include <wx/translation.h>
+
+// The order here only groups related types together for readability; the picker
+// groups by the category in the step type table and scripts store the type as a
+// string, so values can be inserted anywhere without breaking anything.
 enum class AutomationStepType {
 	AddCustomBone,
+	AddBone,
 	CopyBoneWeights,
+	TransferWeights,
 	DeleteBones,
 	EditBone,
+	SetBoneTransform,
 	RemoveSkinning,
 	ExportFile,
 	SaveProject,
@@ -28,36 +39,58 @@ enum class AutomationStepType {
 	ClearProject,
 	ClearReference,
 	LoadReference,
+	MakeConversionRef,
 	SetBaseShape,
 	SetReferenceShape,
 	ApplyPose,
+	CopySegPart,
 	DeleteShape,
+	DeleteVertices,
 	DuplicateShape,
 	ChangePartitions,
 	FixBadBones,
 	FixClipping,
 	InvertUVs,
+	MergeGeometry,
 	MirrorShape,
+	RecalcNormals,
 	RefineMesh,
 	RenameShape,
+	ApplyTransforms,
 	ResetTransforms,
+	SeparateVertices,
+	SymmetrizeVertices,
 	TransformShape,
 	SetGeometryProperties,
 	SetExtraData,
 	DeleteExtraData,
+	ClearSliderData,
+	CloneSlider,
 	ConformSliders,
 	DeleteSlider,
+	NegateSlider,
+	NewCombinedSlider,
+	NewZapSlider,
 	SetSliderValues,
 	SetSliderProperties,
 	SetShaderProperties,
 	SetTexturePaths,
 	ClearMask,
+	GrowShrinkMask,
+	InvertMask,
 	LoadMask,
-	RemoveUnusedNodes
+	MaskAsymmetric,
+	MaskBoneWeighted,
+	MaskSliderAffected,
+	MaskWeighted,
+	SaveMask,
+	RemoveUnusedNodes,
+	SetVariable,
+	LogMessage
 };
 
-constexpr int AutomationStepTypeCount = 39;
-static_assert(static_cast<int>(AutomationStepType::RemoveUnusedNodes) + 1 == AutomationStepTypeCount,
+constexpr int AutomationStepTypeCount = 64;
+static_assert(static_cast<int>(AutomationStepType::LogMessage) + 1 == AutomationStepTypeCount,
 	"AutomationStepTypeCount must match the number of enum values");
 
 std::string AutomationStepTypeToString(AutomationStepType type);
@@ -172,6 +205,7 @@ struct AutomationStep {
 	std::string importFilePath;
 	bool importFromFolder = false;
 	bool importBeforeBatch = false;
+	bool importTriSliders = true;
 
 	// TransformShape params
 	float moveX = 0.0f, moveY = 0.0f, moveZ = 0.0f;
@@ -194,6 +228,12 @@ struct AutomationStep {
 	// InvertUVs params
 	bool invertU = false;
 	bool invertV = false;
+
+	// RecalcNormals params
+	bool normalsForce = true;		// Recalculate even if the shape's normals are locked
+	int normalsSeamSmooth = -1;		// -1 = no change, 0 = disable, 1 = enable
+	float normalsSeamAngle = -1.0f; // < 0 = no change, otherwise seam smoothing angle in degrees
+	int normalsLock = -1;			// -1 = no change, 0 = unlock, 1 = lock
 
 	// DeleteBones params
 	std::vector<std::string> deleteBoneNames;
@@ -296,7 +336,209 @@ struct AutomationStep {
 	int fixClipMode = 0;          // 0 = Shapes, 1 = Sliders
 	float fixClipStrength = 0.5f;  // 0.0 - 1.0
 	std::vector<std::string> fixClipSliderNames;
+
+	// AddBone params
+	std::vector<std::string> addBoneRefNames;
+
+	// TransferWeights params
+	std::vector<std::string> transferWeightBones; // Empty = every bone of the reference
+	bool transferWeightUseMask = true;
+
+	// SetBoneTransform params
+	std::vector<std::string> boneXformNames;
+	int boneXformMode = 0; // 0 = skin transform from node, 1 = node transform from skin
+
+	// MakeConversionRef params
+	std::string convRefSliderName;
+
+	// DeleteVertices params
+	bool deleteVertsMasked = false;     // false = delete unmasked (mask protects), like the menu item
+	bool deleteVertsDeleteEmpty = true; // Delete shapes that lose all of their triangles
+
+	// SeparateVertices params
+	std::string separateNewName;
+
+	// MergeGeometry params
+	std::string mergeSourceShape;
+	std::string mergeTargetShape;
+	bool mergeDeleteSource = false;
+
+	// SymmetrizeVertices / MaskAsymmetric params
+	bool asymDoPositions = true;
+	bool asymDoUnmatched = false;
+	bool asymDoSliders = false;
+	bool asymDoBones = false;
+	int asymMaskMode = 0; // 0 = asymmetric triangles, 1 = asymmetric vertices
+
+	// NewZapSlider / NewCombinedSlider / CloneSlider params
+	std::string newSliderName;
+	std::string cloneSliderSource;
+
+	// NegateSlider params
+	std::vector<std::string> negateSliderNames;
+
+	// ClearSliderData params
+	std::vector<std::string> clearSliderNames; // Empty = every slider of the project
+	bool clearSliderUseMask = true;
+
+	// GrowShrinkMask params
+	int maskGrowShrinkMode = 0;  // 0 = grow, 1 = shrink
+	int maskGrowShrinkCount = 1; // Number of times to grow/shrink
+
+	// MaskBoneWeighted params
+	std::vector<std::string> maskBoneNames;
+
+	// MaskSliderAffected params
+	std::string maskSliderName;
+
+	// SaveMask params
+	std::string saveMaskFile;
+	std::string saveMaskName;
+	bool saveMaskMerge = true; // Keep the other entries of an existing mask file
+
+	// SetVariable params
+	std::string variableName;
+	std::string variableValue;
+
+	// LogMessage params
+	std::string logMessageText;
+	int logMessageLevel = 0; // 0 = message, 1 = warning, 2 = error
 };
+
+// Type of an AutomationStep member described by an AutomationField.
+enum class AutomationFieldKind {
+	Bool,
+	Int,
+	Float,
+	String,
+	StringList
+};
+
+// How a field is presented on the step's settings page. Fields marked None are
+// left to the step type's UI hooks (file pickers, dependent dropdowns, grids).
+enum class AutomationFieldUI {
+	None,
+	CheckBox,
+	Text,			// wxTextCtrl holding the value verbatim
+	TextList,		// wxTextCtrl holding a comma-separated list
+	TextPercent,	// wxTextCtrl showing 0-100 for a 0.0-1.0 float
+	TextOptional,	// wxTextCtrl that is empty when the value is negative
+	ChoiceTriState, // wxChoice mapping "no change"/"no"/"yes" to -1/0/1
+	ChoiceIndex,	// wxChoice whose selection index is the value
+	ChoiceString	// wxChoice whose selected label is the value
+};
+
+// One parameter of a step type: how it is stored, serialized and edited.
+struct AutomationField {
+	AutomationFieldKind kind = AutomationFieldKind::Bool;
+	const char* xmlName = nullptr;
+
+	union Member {
+		bool AutomationStep::* asBool;
+		int AutomationStep::* asInt;
+		float AutomationStep::* asFloat;
+		std::string AutomationStep::* asString;
+		std::vector<std::string> AutomationStep::* asStringList;
+	} member{};
+
+	union DefaultValue {
+		bool asBool;
+		int asInt;
+		float asFloat;
+	} defaultValue{};
+
+	const char* control = nullptr; // XRC name of the editing control
+	AutomationFieldUI ui = AutomationFieldUI::None;
+	const char* format = nullptr;  // printf format for numeric text controls
+};
+
+inline AutomationField FieldBool(const char* xmlName, bool AutomationStep::* member, bool defaultValue, const char* control = nullptr) {
+	AutomationField f;
+	f.kind = AutomationFieldKind::Bool;
+	f.xmlName = xmlName;
+	f.member.asBool = member;
+	f.defaultValue.asBool = defaultValue;
+	f.control = control;
+	f.ui = control ? AutomationFieldUI::CheckBox : AutomationFieldUI::None;
+	return f;
+}
+
+inline AutomationField FieldInt(const char* xmlName, int AutomationStep::* member, int defaultValue,
+	const char* control = nullptr, AutomationFieldUI ui = AutomationFieldUI::Text, const char* format = nullptr) {
+	AutomationField f;
+	f.kind = AutomationFieldKind::Int;
+	f.xmlName = xmlName;
+	f.member.asInt = member;
+	f.defaultValue.asInt = defaultValue;
+	f.control = control;
+	f.ui = control ? ui : AutomationFieldUI::None;
+	f.format = format;
+	return f;
+}
+
+inline AutomationField FieldFloat(const char* xmlName, float AutomationStep::* member, float defaultValue,
+	const char* control = nullptr, AutomationFieldUI ui = AutomationFieldUI::Text, const char* format = nullptr) {
+	AutomationField f;
+	f.kind = AutomationFieldKind::Float;
+	f.xmlName = xmlName;
+	f.member.asFloat = member;
+	f.defaultValue.asFloat = defaultValue;
+	f.control = control;
+	f.ui = control ? ui : AutomationFieldUI::None;
+	f.format = format;
+	return f;
+}
+
+inline AutomationField FieldString(const char* xmlName, std::string AutomationStep::* member,
+	const char* control = nullptr, AutomationFieldUI ui = AutomationFieldUI::Text) {
+	AutomationField f;
+	f.kind = AutomationFieldKind::String;
+	f.xmlName = xmlName;
+	f.member.asString = member;
+	f.control = control;
+	f.ui = control ? ui : AutomationFieldUI::None;
+	return f;
+}
+
+inline AutomationField FieldStringList(const char* xmlName, std::vector<std::string> AutomationStep::* member, const char* control = nullptr) {
+	AutomationField f;
+	f.kind = AutomationFieldKind::StringList;
+	f.xmlName = xmlName;
+	f.member.asStringList = member;
+	f.control = control;
+	f.ui = control ? AutomationFieldUI::TextList : AutomationFieldUI::None;
+	return f;
+}
+
+namespace tinyxml2 {
+class XMLDocument;
+class XMLElement;
+}
+
+// Everything the rest of the program needs to know about a step type. This table
+// is the single source of truth: enum/string conversion, the type picker, the
+// settings page, XML serialization and placeholder substitution all read from it.
+struct AutomationStepInfo {
+	AutomationStepType type = AutomationStepType::LoadReference;
+	const char* xmlName = nullptr;	// stable identifier written to saved scripts
+	const char* category = nullptr; // group in the step type picker
+	const char* displayName = nullptr;	// "<Category>: <Name>" shown to the user
+	const char* xrcPage = nullptr;	// wxPanel name of the settings page
+	std::vector<AutomationField> fields;
+
+	// Optional hooks for parameters a plain field can't describe (lists of structs)
+	void (*loadExtra)(AutomationStep&, tinyxml2::XMLElement*) = nullptr;
+	void (*saveExtra)(const AutomationStep&, tinyxml2::XMLDocument&, tinyxml2::XMLElement*) = nullptr;
+	void (*substituteExtra)(AutomationStep&, const std::map<std::string, std::string>&) = nullptr;
+};
+
+const std::vector<AutomationStepInfo>& GetAutomationStepTypes();
+const AutomationStepInfo& GetAutomationStepInfo(AutomationStepType type);
+
+// Substitute placeholders like {{KEY}} in all string fields of a single step.
+// Steps that define variables at run time need this per step rather than once
+// for the whole script.
+void SubstituteStepPlaceholders(AutomationStep& step, const std::map<std::string, std::string>& variables);
 
 class AutomationScript {
 	std::vector<AutomationStep> steps;

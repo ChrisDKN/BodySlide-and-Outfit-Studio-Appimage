@@ -16,9 +16,11 @@ See the included LICENSE file
 
 #include "../utils/StringStuff.h"
 
+#include <Object3d.hpp>
 #include <SOIL2/SOIL2.h>
 #include <gli.hpp>
 
+typedef unsigned int GLenum;
 typedef unsigned int GLuint;
 class GLMaterial;
 
@@ -27,7 +29,16 @@ public:
 	ResourceLoader();
 	~ResourceLoader();
 
-	GLMaterial* AddMaterial(const std::vector<std::string>& textureFiles, const std::string& vShaderFile, const std::string& fShaderFile, const bool reloadTextures = false);
+	// useDefaultTexture substitutes the "no image" placeholder for a missing diffuse. Only pass true for shapes that
+	// have a shader to begin with - a shape without one has no textures by definition and is meant to render untextured.
+	// isPBR says the slots hold what Community Shaders' True PBR puts in them, which spares slot 5 the environment mask
+	// classification: that slot carries an RMAOS map, and the classifier would call every one of them a Complex Material.
+	GLMaterial* AddMaterial(const std::vector<std::string>& textureFiles,
+							const std::string& vShaderFile,
+							const std::string& fShaderFile,
+							const bool reloadTextures = false,
+							const bool useDefaultTexture = true,
+							const bool isPBR = false);
 
 
 	//Central Point for loading texture files.  Calls appropriate resource loading subroutine, and
@@ -59,6 +70,31 @@ public:
 	bool RenameTexture(const std::string& texNameSrc, const std::string& texNameDest, bool overwrite = false);
 
 
+	// Whether the texture looks like a Skyrim "Complex Material" mask: glossiness in green and
+	//  metalness in blue, instead of the greyscale reflection mask vanilla puts in the same slot.
+	//  Classified once when the texture is loaded into the slot that carries it, since the verdict
+	//  is about the map as a whole and can't be made from the texel a fragment happens to sample.
+	bool IsComplexMaterialTexture(const std::string& texName) const;
+
+	// Highest mip level the texture actually has, 0 for one without a mip chain. Reflections pick
+	//  their mip from roughness, so the shader needs the real number rather than an assumed one.
+	int GetTextureMaxMipLevel(const std::string& texName) const;
+
+	// Edge length of the cube map's base level, 0 for a texture that isn't one. A 1x1 cube map holds
+	//  no reflection anybody wants; it is how Community Shaders and ENB mods mark a slot as wanting
+	//  a dynamic cube map instead, which is the only reason the size is worth remembering.
+	int GetCubemapSize(const std::string& texName) const;
+
+	// What a 1x1 cube map's single texel stood for, read as an sRGB F0 reflectance and returned
+	//  linear. Black means full reflectance rather than a black reflection, so it comes back as 1.0,
+	//  which is also what any cube map that isn't 1x1 returns.
+	nifly::Vector3 GetCubemapF0Color(const std::string& texName) const;
+
+	// Whether the texture was uploaded in an sRGB format, which the GPU decodes to linear as it is
+	//  sampled. Only a shader that does that decode itself needs to know, so it can skip it rather
+	//  than decode the texture a second time.
+	bool IsSRGBTexture(const std::string& texName) const;
+
 	// compares the incoming cacheTime with the internal cacheTime, and returns true if they match.
 	//  if they do not match, the incoming cacheTime is updated to match and the function returns false.
 	bool CacheStamp(int64_t& inCacheTime) {
@@ -72,13 +108,25 @@ public:
 
 private:
 	static bool extChecked;
-	GLuint GLI_create_texture(gli::texture& texture, GLuint textureID = 0);
-	GLuint GLI_load_texture(const std::string& fileName, GLuint textureID = 0);
-	GLuint GLI_load_texture_from_memory(const char* buffer, size_t size, GLuint textureID = 0);
+	// isSRGB, if given, receives whether the texture went up in an sRGB format.
+	GLuint GLI_create_texture(gli::texture& texture, GLuint textureID = 0, bool* isSRGB = nullptr);
+	GLuint GLI_load_texture(const std::string& fileName, GLuint textureID = 0, bool* isSRGB = nullptr);
+	GLuint GLI_load_texture_from_memory(const char* buffer, size_t size, GLuint textureID = 0, bool* isSRGB = nullptr);
+
+	// Highest level with actual storage for the currently bound texture. GL_TEXTURE_MAX_LEVEL isn't
+	//  usable here: the SOIL path never sets it and leaves it at its 1000 default, so the levels are
+	//  walked until one comes back with no width. Pass the cube map's first face for a cube map.
+	static int GetBoundMaxMipLevel(GLenum levelTarget);
+	// Reads the smallest mip - the average of the whole texture - and decides from it.
+	bool ClassifyComplexMaterial(GLuint textureID) const;
+	// Records the bound cube map's size, and for a 1x1 one the color its texel stands for.
+	void ClassifyCubemap(const std::string& texName, GLuint textureID);
 
 	// If N3983 gets accepted into a future C++ standard then
 	// we wouldn't have to explicitly define our own hash here.
-	typedef std::tuple<std::vector<std::string>, std::string, std::string> MaterialKey;
+	// The default texture flag is part of the key: the same (empty) texture list resolves to a different
+	// material depending on whether the "no image" placeholder was substituted for the diffuse.
+	typedef std::tuple<std::vector<std::string>, std::string, std::string, bool> MaterialKey;
 	struct MatKeyHash {
 		size_t operator()(const MaterialKey& key) const;
 	};
@@ -89,6 +137,13 @@ private:
 
 	TextureCache textures;
 	MaterialCache materials;
+	// Keyed by texture name like the texture cache, so a verdict outlives the material that
+	// triggered it and survives the material cache handing back an existing entry.
+	std::map<std::string, bool, case_insensitive_compare> complexMaterialTextures;
+	std::map<std::string, int, case_insensitive_compare> textureMaxMipLevels;
+	std::map<std::string, int, case_insensitive_compare> cubemapSizes;
+	std::map<std::string, nifly::Vector3, case_insensitive_compare> cubemapF0Colors;
+	std::map<std::string, bool, case_insensitive_compare> srgbTextures;
 
 	int64_t cacheTime = 1;
 };

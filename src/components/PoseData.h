@@ -71,6 +71,27 @@ public:
 	// is set). Bones without a matching entry are reset to the identity pose.
 	// Calls UpdatePoseTransform on every bone.
 	void ApplyToSkeleton() const;
+
+	// Writes the pose that lies at t between a and b into outPose (0 yields a,
+	// 1 yields b). Translation and scale are mixed linearly, rotation along the
+	// shortest arc. outPose must not be b.
+	static void Interpolate(const PoseData& a, const PoseData& b, float t, PoseData& outPose);
+};
+
+// A full Havok animation, stored as one PoseData per frame so that playback can
+// reuse PoseData::ApplyToSkeleton for every frame.
+class AnimationData {
+public:
+	std::string name;
+	// The HKX file the animation is read from
+	std::string sourcePath;
+	// Seconds per frame as stored in the HKX animation (usually 1/30).
+	float frameDuration = 1.0f / 30.0f;
+	std::vector<PoseData> framePoses;
+
+	size_t GetNumFrames() const { return framePoses.size(); }
+	// Favorites are listed before they're read, which only happens once one is selected
+	bool IsLoaded() const { return !framePoses.empty(); }
 };
 
 class PoseDataCollection {
@@ -81,11 +102,18 @@ public:
 	// push_back would invalidate every previously stored pointer.
 	std::deque<PoseData> poseData;
 
+	// Loaded HKX animations. Same stable-pointer reasoning as poseData:
+	// the animation combobox holds raw AnimationData* in its ClientData.
+	std::deque<AnimationData> animationData;
+
 	// Loads all pose data in the specified folder.
 	int LoadData(const std::string& basePath);
 
 	// Appends a pose to the collection and returns a stable pointer to it.
 	PoseData* AddPose(PoseData pose);
+
+	// Appends an animation to the collection and returns a stable pointer to it.
+	AnimationData* AddAnimation(AnimationData anim);
 
 	// Returns the on-disk pose format inferred from the file extension.
 	static PoseFileFormat GetPoseFileFormat(const std::string& filePath);
@@ -109,6 +137,12 @@ public:
 	// The pose name is derived from the file name (without extension) and is
 	// prefixed with namePrefix. Entries are appended to poseData.
 	int LoadJsonData(const std::string& basePath, const std::string& namePrefix);
+
+	// Loads the community poses installed in the game's data folder:
+	// ScreenArcherMenu YAML poses (Data\SAM\Poses) or, with fallout4 set,
+	// ScreenArcherFramework JSON poses (Data\F4SE\Plugins\SAF\Poses).
+	// Entries are appended to poseData with a "SAM: " name prefix.
+	int LoadGamePoses(const std::string& gameDataPath, bool fallout4);
 
 	// Loads a single SAM pose YAML file into outPose.
 	static bool LoadYamlPose(const std::string& filePath, PoseData& outPose);
@@ -148,6 +182,39 @@ public:
 	// success, outPose.boneData is populated and absoluteLocal is set.
 	// Returns false if either file cannot be parsed.
 	static bool LoadHkxPose(const std::string& skeletonHkxPath, const std::string& animHkxPath, PoseData& outPose, uint32_t frameIndex = 0);
+
+	// Loads a full Havok animation from a skeleton + animation HKX pair, one
+	// PoseData per frame (see LoadHkxPose for how tracks are matched to bones).
+	// Returns false if either file cannot be parsed or the animation has no
+	// frames, filling errorOut with the reason.
+	static bool LoadHkxAnimation(const std::string& skeletonHkxPath, const std::string& animHkxPath, AnimationData& outAnim, std::string* errorOut = nullptr);
+
+	// HKX poses and animations are read against a Havok skeleton that sits
+	// next to the configured reference skeleton NIF, with an .hkx extension.
+	// Returns false if no reference skeleton is configured or the .hkx file
+	// doesn't exist, with a message for the user in errorOut.
+	static bool FindReferenceSkeletonHkx(std::string& outPath, wxString& errorOut);
+
+	// Returns the entry of the HKX animation file, adding one that isn't loaded
+	// yet if there's none. Entries are named after the file, with a number
+	// added when another file of the same name is listed already.
+	AnimationData* AddAnimationFile(const std::string& filePath);
+
+	// Reads the frames of an entry from AddAnimationFile, against the .hkx
+	// skeleton next to the reference skeleton. Does nothing if it's loaded.
+	static bool LoadAnimationFrames(AnimationData& anim, wxString& errorOut);
+
+	// HKX animation files kept as favorites per game, as full paths. BodySlide
+	// and Outfit Studio share them through AnimationFavorites.xml next to the
+	// programs, which holds files inside the game data folder relative to it.
+	std::vector<std::string> favoriteAnimations;
+
+	// Reads the game's favorites again and adds an entry for each of them
+	void LoadFavoriteAnimations(const std::string& gameName);
+	bool IsFavoriteAnimation(const AnimationData& anim) const;
+	// Adds the animation to the game's favorites or removes it, and saves them
+	// right away so the other program sees the change
+	void SetFavoriteAnimation(const AnimationData& anim, const std::string& gameName, bool favorite);
 };
 
 class PoseDataFile {

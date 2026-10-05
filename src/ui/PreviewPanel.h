@@ -21,6 +21,9 @@ See the included LICENSE file
 
 #include <wx/wx.h>
 #include <wx/activityindicator.h>
+#include <wx/popupwin.h>
+#include <wx/timer.h>
+#include <wx/weakref.h>
 
 class BodySlideApp;
 class PreviewCanvas;
@@ -39,10 +42,39 @@ class PreviewPanel : public wxPanel {
 	BodySlideApp* app = nullptr;
 	PreviewCanvas* canvas = nullptr;
 	std::unique_ptr<wxGLContext> context;
+	wxPanel* toolBarPanel = nullptr;
 	wxButton* optButton = nullptr;
 	wxButton* lockShapeButton = nullptr;
 	wxCheckBox* showReferenceCheckbox = nullptr;
 	wxCheckBox* showHelperShapesCheckbox = nullptr;
+	wxCheckBox* physicsCheckbox = nullptr;
+	wxButton* physicsWindButton = nullptr;
+	// Created on demand under the window the preview currently lives in, so the
+	// controls only exist while the drop-down is around. The values are kept
+	// here instead. Weak references: docking the preview back destroys the
+	// window the popup hangs off, and the popup with it.
+	wxWeakRef<wxPopupTransientWindow> physicsWindPopup;
+	wxWeakRef<wxSlider> physicsWindSlider;
+	wxWeakRef<wxChoice> physicsWindDir;
+	int physicsWindStrength = 0;
+	int physicsWindDirIndex = 0;
+	wxStaticText* poseLabel = nullptr;
+	wxChoice* poseChoice = nullptr;
+	wxButton* animationButton = nullptr;
+	// Created on demand like the wind drop-down. The animation state itself
+	// lives in the application.
+	wxWeakRef<wxPopupTransientWindow> animationPopup;
+	wxWeakRef<wxChoice> animationChoice;
+	wxWeakRef<wxBitmapButton> animationFavoriteButton;
+	// The star the favorite button shows, so playback doesn't reload its bitmap every frame
+	bool animationFavoriteShown = false;
+	wxWeakRef<wxButton> animationPlayButton;
+	wxWeakRef<wxSlider> animationFrameSlider;
+	wxWeakRef<wxStaticText> animationFrameText;
+	wxWeakRef<wxCheckBox> animationInterpolateCheck;
+	int animationSpeedIndex = 2;
+	// Ticks physics and animation playback
+	wxTimer pumpTimer;
 	wxStaticText* projectLabel = nullptr;
 	wxChoice* projectChoice = nullptr;
 	wxStaticText* presetLabel = nullptr;
@@ -61,10 +93,22 @@ class PreviewPanel : public wxPanel {
 	std::unordered_map<std::string, GLMaterial*> shapeMaterials;
 	std::string baseDataPath;
 
-	std::unique_ptr<SFMaterialDatabase> sfMaterialDb;
-	std::string sfMaterialDbContent;
-	std::unique_ptr<std::istringstream> sfMaterialDbStream;
-	SFMaterialDatabase* GetSFMaterialDatabase();
+	std::vector<std::unique_ptr<SFMaterialDatabase>> sfMaterialDbs;
+	std::vector<std::string> sfMaterialDbContents;
+	std::vector<std::unique_ptr<std::istringstream>> sfMaterialDbStreams;
+	bool sfMaterialDbsLoaded = false;
+	bool GetSFMaterialJSON(const std::string& matPath, std::string& jsonOutput);
+	void CreatePhysicsWindPopup();
+	void DestroyPhysicsWindPopup();
+	void ApplyPhysicsWind();
+	void CreateAnimationPopup();
+	void DestroyAnimationPopup();
+	// Refills the animation drop-down from the animations loaded so far
+	void PopulateAnimationChoice();
+	// Re-flows the tool bar above the canvas after a control was shown or
+	// hidden. The panel itself keeps its size, so its sizer needs the explicit
+	// nudge.
+	void LayoutToolBar();
 	std::vector<std::string> extraNifPaths;
 	std::vector<PreviewProjectEntry> projectEntries;
 	std::string initialPresetName;
@@ -88,6 +132,41 @@ public:
 	void OnShowReference(wxCommandEvent& event);
 	void OnShowHelperShapes(wxCommandEvent& event);
 	void OnPopout(wxCommandEvent& event);
+
+	void OnPhysics(wxCommandEvent& event);
+	void OnPhysicsWindButton(wxCommandEvent& event);
+	void OnPhysicsWind(wxScrollEvent& event);
+	void OnPhysicsWindDir(wxCommandEvent& event);
+	void OnPumpTimer(wxTimerEvent& event);
+
+	void OnPoseChoice(wxCommandEvent& event);
+	void OnAnimationButton(wxCommandEvent& event);
+	void OnAnimationChoice(wxCommandEvent& event);
+	void OnAnimationFavorite(wxCommandEvent& event);
+	void OnLoadAnimation(wxCommandEvent& event);
+	void OnAnimationPlayPause(wxCommandEvent& event);
+	void OnAnimationFrame(wxScrollEvent& event);
+	void OnAnimationSpeed(wxCommandEvent& event);
+	void OnAnimationInterpolate(wxCommandEvent& event);
+
+	// One physics and animation tick. Internally paced, so any event source may
+	// call it at any rate; a no-op while nothing moves.
+	void Pump();
+	// Runs the tick timer while physics or an animation is playing
+	void SetPumpActive(bool active);
+
+	// Refills the pose list and reflects the selected pose and animation
+	void RefreshPoseControls();
+	// Reflects the animation's frame and play state in the drop-down
+	void SyncAnimationControls();
+
+	// Shows or hides the whole physics block. Only meshes that reference a
+	// physics XML can be simulated, so the controls stay out of the way for
+	// everything else.
+	void ShowPhysicsControls(bool show);
+	// Reflects whether the simulation is actually running, and shows the wind
+	// controls only while it is.
+	void SetPhysicsChecked(bool checked);
 
 	void ShowPopoutButton(bool show);
 	void SetPopoutButtonDetachedState(bool detached);
@@ -113,19 +192,21 @@ public:
 		if (weightSlider) {
 			weightSlider->SetValue(weight);
 			weightSlider->Show(show);
-			Layout();
+			LayoutToolBar();
 		}
 	}
 
 	void ShowLockShapeButton(bool show = true) {
-		if (lockShapeButton)
+		if (lockShapeButton) {
 			lockShapeButton->Show(show);
+			LayoutToolBar();
+		}
 	}
 
 	void ShowReferenceCheckbox(bool show = true) {
 		if (showReferenceCheckbox) {
 			showReferenceCheckbox->Show(show);
-			Layout();
+			LayoutToolBar();
 		}
 	}
 
@@ -143,6 +224,16 @@ public:
 	void SetMeshVisibility(const std::string& shapeName, bool visible) {
 		gls.SetMeshVisibility(shapeName, visible);
 	}
+
+	void SetComplexMaterialEnabled(bool enabled) {
+		gls.SetComplexMaterialEnabled(enabled);
+		Render();
+	}
+
+	// Unlike the Complex Material switch this decides which shader files a True PBR shape is given, so
+	// the caller has to rebuild the preview meshes afterwards for it to take effect.
+	void SetPBREnabled(bool enabled) { gls.SetPBREnabled(enabled); }
+	bool IsPBREnabled() const { return gls.IsPBREnabled(); }
 
 	void SetBaseDataPath(const std::string& path) { baseDataPath = path; }
 
@@ -173,12 +264,13 @@ public:
 						  const std::string& vShader,
 						  const std::string& fShader,
 						  const bool hasMatFile = false,
-						  const MaterialFile& matFile = MaterialFile()) {
+						  const MaterialFile& matFile = MaterialFile(),
+						  const bool isPBR = false) {
 		Mesh* m = gls.GetMesh(shapeName);
 		if (!m)
 			return;
 
-		GLMaterial* mat = gls.AddMaterial(textureFiles, vShader, fShader);
+		GLMaterial* mat = gls.AddMaterial(textureFiles, vShader, fShader, false, m->hasShader, isPBR);
 		if (mat) {
 			m->material = mat;
 			shapeMaterials[shapeName] = mat;

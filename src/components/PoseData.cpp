@@ -7,6 +7,7 @@ See the included LICENSE file
 #include "Anim.h"
 #include "../utils/FileSearchUtil.h"
 #include "../utils/PlatformUtil.h"
+#include "../utils/StringStuff.h"
 
 #include <wx/filename.h>
 
@@ -73,9 +74,37 @@ int PoseDataCollection::LoadData(const std::string& basePath) {
 	return 0;
 }
 
+int PoseDataCollection::LoadGamePoses(const std::string& gameDataPath, bool fallout4) {
+	if (gameDataPath.empty())
+		return 0;
+
+	wxString poseDir = wxString::FromUTF8(gameDataPath);
+	if (!poseDir.EndsWith(PathSepChar))
+		poseDir.Append(PathSepChar);
+
+	if (fallout4)
+		poseDir += wxString("F4SE") + PathSepChar + "Plugins" + PathSepChar + "SAF" + PathSepChar + "Poses";
+	else
+		poseDir += wxString("SAM") + PathSepChar + "Poses";
+
+	if (!wxDirExists(poseDir))
+		return 0;
+
+	std::string utf8Dir(poseDir.ToUTF8().data());
+	if (fallout4)
+		return LoadJsonData(utf8Dir, "SAM: ");
+
+	return LoadYamlData(utf8Dir, "SAM: ");
+}
+
 PoseData* PoseDataCollection::AddPose(PoseData pose) {
 	poseData.push_back(std::move(pose));
 	return &poseData.back();
+}
+
+AnimationData* PoseDataCollection::AddAnimation(AnimationData anim) {
+	animationData.push_back(std::move(anim));
+	return &animationData.back();
 }
 
 PoseFileFormat PoseDataCollection::GetPoseFileFormat(const std::string& filePath) {
@@ -146,6 +175,50 @@ void PoseDataCollection::CaptureCurrentPose(const std::string& poseName, bool ab
 	}
 }
 
+// Rotation vectors cannot be mixed componentwise, so the shortest arc from a to
+// b is taken as a fractional power of the delta rotation: a * (a⁻¹b)^t. Rotation
+// matrices are orthonormal, which makes the transpose the inverse.
+static nifly::Vector3 InterpolateRotation(const nifly::Vector3& a, const nifly::Vector3& b, float t) {
+	using namespace nifly;
+
+	Matrix3 matA = RotVecToMat(a);
+	Vector3 delta = RotMatToVec(matA.Transpose() * RotVecToMat(b));
+	return RotMatToVec(matA * RotVecToMat(delta * t));
+}
+
+void PoseData::Interpolate(const PoseData& a, const PoseData& b, float t, PoseData& outPose) {
+	outPose.name = a.name;
+	outPose.readOnly = a.readOnly;
+	outPose.absoluteLocal = a.absoluteLocal;
+
+	// outPose is written from a first, so it must not alias b.
+	outPose.boneData = a.boneData;
+
+	if (t <= 0.0f)
+		return;
+
+	for (size_t i = 0; i < outPose.boneData.size(); ++i) {
+		PoseBoneData& bd = outPose.boneData[i];
+
+		// Both poses normally come from the same animation, so they carry the
+		// same bones in the same order and the matching index hits.
+		const PoseBoneData* target = nullptr;
+		if (i < b.boneData.size() && b.boneData[i].name == bd.name) {
+			target = &b.boneData[i];
+		}
+		else {
+			auto it = std::find_if(b.boneData.begin(), b.boneData.end(), [&bd](const PoseBoneData& other) { return other.name == bd.name; });
+			if (it == b.boneData.end())
+				continue;
+			target = &*it;
+		}
+
+		bd.translation += (target->translation - bd.translation) * t;
+		bd.scale += (target->scale - bd.scale) * t;
+		bd.rotation = InterpolateRotation(bd.rotation, target->rotation, t);
+	}
+}
+
 void PoseData::ApplyToSkeleton() const {
 	using namespace nifly;
 
@@ -157,8 +230,11 @@ void PoseData::ApplyToSkeleton() const {
 		if (!bone)
 			continue;
 
+		// Case-insensitive: Fallout 4's skeleton.hkx and skeleton.nif disagree
+		// on the case of a few bones (Head/HEAD, Spine1/SPINE1, Spine2/SPINE2,
+		// Weapon/WEAPON), and HKX poses carry the HKX skeleton's spelling.
 		auto it = std::find_if(boneData.begin(), boneData.end(),
-			[&boneName](const PoseBoneData& bd) { return bd.name == boneName; });
+			[&boneName](const PoseBoneData& bd) { return StringsEqualInsens(bd.name.c_str(), boneName.c_str()); });
 
 		if (it != boneData.end()) {
 			if (absoluteLocal) {

@@ -76,6 +76,7 @@ struct MergeCheckErrors {
 	bool shaderMismatch = false;
 	bool textureMismatch = false;
 	bool alphaPropMismatch = false;
+	bool transformsMismatch = false;
 };
 
 // SymmetricVertices: result from the function MatchSymmetricVertices
@@ -154,9 +155,34 @@ class OutfitProject {
 	// All cloth data blocks that have been loaded during work
 	std::unordered_map<std::string, std::unique_ptr<nifly::BSClothExtraData>> clothData;
 
+	// All HDT-SMP physics links that sat on the root node of a loaded NIF. The
+	// game reads only one of them, so a single one is picked for the output.
+	std::vector<std::unique_ptr<nifly::NiStringExtraData>> rootPhysicsData;
+
 	std::unique_ptr<std::istream> GetExternalGeometryStream(const std::string& dir, const std::string& path, const std::string& nifFilePath = std::string()) const;
-	SFMaterialDatabase* GetSFMaterialDatabase();
+	bool GetSFMaterialJSON(const std::string& matPath, std::string& jsonOutput);
 	void ValidateNIF(nifly::NifFile& nif, const std::string& nifFilePath = std::string());
+
+	// Records the HDT-SMP links on the root node of a NIF that is about to be
+	// merged into the work NIF, for the choice made on save
+	void CaptureRootPhysicsData(nifly::NifFile& srcNif);
+
+	// One block MergeRootExtraData could bring over: the block in the loaded NIF
+	// and, when the project already has one of the same type and name, the block
+	// on the work root that merging it would replace.
+	struct RootExtraDataCandidate {
+		nifly::NiExtraData* source = nullptr;
+		nifly::NiExtraData* replaces = nullptr;
+	};
+
+	// Copies the extra data of a NIF's root node onto the work NIF's root node.
+	// CloneShape only brings over the shape and its bones, so without this every
+	// file merged after the first loses whatever sat on its root.
+	void MergeRootExtraData(nifly::NifFile& srcNif);
+
+	// Lets the user narrow the blocks to merge down. Returns false on cancel.
+	bool ChooseRootExtraData(std::vector<RootExtraDataCandidate>& merging);
+
 	std::string SliderDataTargetForShape(nifly::NiShape* shape);
 	std::string ShapeTargetOrDefault(const std::string& shapeName);
 	bool TargetNameInUse(const std::string& targetName, const std::string& exceptShapeName);
@@ -166,9 +192,10 @@ class OutfitProject {
 	bool ResolveSliderDataEntry(const SliderDataKey& key, size_t& sliderIndex, size_t& dataIndex);
 	bool ShapeSliderDataIsLocalOnly(const std::string& shapeName);
 
-	std::unique_ptr<SFMaterialDatabase> sfMaterialDb;
-	std::string sfMaterialDbContent;
-	std::unique_ptr<std::istream> sfMaterialDbStream;
+	std::vector<std::unique_ptr<SFMaterialDatabase>> sfMaterialDbs;
+	std::vector<std::string> sfMaterialDbContents;
+	std::vector<std::unique_ptr<std::istringstream>> sfMaterialDbStreams;
+	bool sfMaterialDbsLoaded = false;
 
 	// Applies the inverse of the blended pose transform to a NIF-space diff
 	// vector for a single vertex, converting it from posed space to rest space.
@@ -200,6 +227,21 @@ public:
 	std::unordered_map<std::string, std::vector<std::string>> shapeTextures;
 	std::unordered_map<std::string, MaterialFile> shapeMaterialFiles;
 
+	// Physics XML files ("HDT Skinned Mesh Physics Object" extra data) that
+	// were linked to each shape by the NIF it came from. Only the first NIF
+	// loaded keeps its node hierarchy in the work NIF; every later file
+	// contributes shapes alone, so the link - which the game stores on the
+	// root node - has to be captured before the merge or it is lost.
+	std::unordered_map<std::string, std::vector<std::string>> shapePhysicsFiles;
+
+	// Records the physics XML files linked to the given shapes of a NIF that
+	// is about to be merged into the work NIF, keyed by shape name.
+	void CapturePhysicsFiles(nifly::NifFile& nif, const std::vector<nifly::NiShape*>& shapes);
+
+	// Set while an unattended script drives the project. Prompts that would
+	// otherwise stall the run fall back to their default answer instead.
+	bool suppressPrompts = false;
+
 	// inOwner is meant to provide access to OutfitStudio for the purposes of reporting process status only.
 	OutfitProject(OutfitStudioFrame* inOwner = nullptr);
 	~OutfitProject();
@@ -217,6 +259,11 @@ public:
 	wxString mSFMorphPath;
 	wxString mSFMorphTargetShape;
 	bool bPose = false;
+
+	// Physics preview: replacement pose-to-global transforms for bones driven
+	// by the simulation, or nullptr while physics is off. Owned by the
+	// physics controller; consumed by GetLiveVerts' skinning.
+	const AnimPoseOverrideMap* physicsPose = nullptr;
 
 	// Reference source info (remembered when reference is loaded from an OSP)
 	std::string mRefProjectFile;    // OSP file path relative to project dir
@@ -241,6 +288,11 @@ public:
 
 	nifly::NifFile* GetWorkNif() { return &workNif; }
 	AnimInfo* GetWorkAnim() { return &workAnim; }
+
+	// Resolves a physics XML path referenced by a "HDT Skinned Mesh Physics
+	// Object" extra data to a readable stream (loose game data folder file,
+	// relative to the project's input NIF, or from loaded archives).
+	std::unique_ptr<std::istream> GetPhysicsXmlStream(const std::string& xmlPath);
 	std::unordered_map<std::string, std::unique_ptr<nifly::BSClothExtraData>>& GetClothData() { return clothData; }
 
 	nifly::NiShape* GetBaseShape() { return baseShape; }
@@ -317,6 +369,12 @@ public:
 	int SaveSliderOBJ(const std::string& sliderName, nifly::NiShape* shape, const std::string& fileName, const bool onlyDiff = false);
 	bool WriteMorphTRI(const std::string& triPath);
 	bool WriteHeadTRI(nifly::NiShape* shape, const std::string& triPath);
+	// Imports a FaceGen head TRI file (mesh with morphs) as a new shape. The shape is named
+	// after the file if no name is given and made unique if that name is already taken.
+	// With withSliders, the morphs are loaded as slider data and the names of the added
+	// sliders are put into newSliders, otherwise only the mesh is imported.
+	// Returns the created shape or nullptr if the file couldn't be loaded.
+	nifly::NiShape* ImportHeadTRI(const std::string& triPath, const std::string& shapeName = "", bool withSliders = true, std::vector<std::string>* newSliders = nullptr);
 	bool WriteSFMorphs(nifly::NiShape* shape, const std::string& morphPath);
 
 	float& SliderValue(const size_t index);
@@ -336,6 +394,8 @@ public:
 	const std::string& TargetToShape(const std::string& targetName);
 	int GetVertexCount(nifly::NiShape* shape);
 	void GetLiveVerts(nifly::NiShape* shape, std::vector<nifly::Vector3>& outVerts, std::vector<nifly::Vector2>* outUVs = nullptr);
+	// GetLiveVerts without the pose: the shape as the sliders morph it
+	void GetMorphedVerts(nifly::NiShape* shape, std::vector<nifly::Vector3>& outVerts, std::vector<nifly::Vector2>* outUVs = nullptr);
 	void GetSliderDiff(nifly::NiShape* shape, const std::string& sliderName, std::vector<nifly::Vector3>& outVerts);
 	void GetSliderDiffUV(nifly::NiShape* shape, const std::string& sliderName, std::vector<nifly::Vector2>& outUVs);
 	size_t GetActiveBoneCount();
@@ -370,6 +430,11 @@ public:
 	void ScaleShape(nifly::NiShape* shape, const nifly::Vector3& scale, std::unordered_map<uint16_t, float>* mask = nullptr);
 	void RotateShape(nifly::NiShape* shape, const nifly::Vector3& angle, std::unordered_map<uint16_t, float>* mask = nullptr);
 	void ApplyTransformToShapeGeometry(nifly::NiShape* shape, const nifly::MatTransform& t);
+
+	// Applies the shape's shape-to-global transform to its geometry and clears the
+	// transform afterwards, so the mesh doesn't effectively move.
+	// Returns false if there was no transform to apply.
+	bool ApplyShapeTransformToGeometry(nifly::NiShape* shape);
 
 	// Uses the AutoMorph class to generate proximity values for bone weights.
 	// This is done by creating several virtual sliders that contain weight offsets for each vertex per bone.
@@ -466,6 +531,7 @@ public:
 	std::vector<bool> CalculateAsymmetricTriangleVertexMask(nifly::NiShape* shape, const Mesh::WeldVertsType& weldVerts);
 
 	void ChooseClothData(nifly::NifFile& nif);
+	void ChoosePhysicsData(nifly::NifFile& nif);
 	void ResetTransforms();
 
 	void CreateSkinning(nifly::NiShape* s);

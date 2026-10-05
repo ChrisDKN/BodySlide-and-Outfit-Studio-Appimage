@@ -179,6 +179,24 @@
 												<option>1</option>
 												<flag>wxALIGN_CENTER_VERTICAL|wxALL</flag>
 												<border>5</border>
+												<object class="wxCheckBox" name="cbPreviewOnLeft">
+													<tooltip>Attach the docked preview to the left side of the window instead of the right side.</tooltip>
+													<label>Preview On Left Side</label>
+													<checked>0</checked>
+												</object>
+											</object>
+										</object>
+									</object>
+									<object class="sizeritem">
+										<option>0</option>
+										<flag>wxEXPAND</flag>
+										<border>0</border>
+										<object class="wxBoxSizer">
+											<orient>wxHORIZONTAL</orient>
+											<object class="sizeritem">
+												<option>1</option>
+												<flag>wxALIGN_CENTER_VERTICAL|wxALL</flag>
+												<border>5</border>
 												<object class="wxCheckBox" name="cbShowForceBodyNormals">
 													<tooltip>With this turned on, BodySlide receives a new checkbox "Force Body Normals". Using it when building adds normal and tangent data to the body meshes (including bodies within outfits) for Skyrim. Use this only if you have a tangent space body mod.</tooltip>
 													<label>Show &apos;Force Body Normals&apos;</label>
@@ -251,6 +269,24 @@
 								<object class="wxCheckBox" name="cbMaskHistory">
 									<tooltip>Enables/disables the undo history for the mask brush and vertex selection.</tooltip>
 									<label>Mask History</label>
+									<checked>1</checked>
+								</object>
+							</object>
+						</object>
+					</object>
+					<object class="sizeritem">
+						<option>0</option>
+						<flag>wxEXPAND|wxLEFT|wxRIGHT</flag>
+						<border>5</border>
+						<object class="wxBoxSizer">
+							<orient>wxHORIZONTAL</orient>
+							<object class="sizeritem">
+								<option>1</option>
+								<flag>wxALIGN_CENTER_VERTICAL|wxALL</flag>
+								<border>5</border>
+								<object class="wxCheckBox" name="cbShapeHoverHighlight">
+									<tooltip>Enables/disables highlighting a shape in the render view when hovering over its name in the shape list of Outfit Studio.</tooltip>
+									<label>Shape Hover Highlight</label>
 									<checked>1</checked>
 								</object>
 							</object>
@@ -365,6 +401,34 @@
 							<tooltip>Enables/disables the perspective view in the rendering window.</tooltip>
 							<label>Perspective View</label>
 							<checked>1</checked>
+						</object>
+					</object>
+					<object class="sizeritem">
+						<option>0</option>
+						<flag>wxEXPAND</flag>
+						<border>0</border>
+						<object class="wxBoxSizer">
+							<orient>wxHORIZONTAL</orient>
+							<object class="sizeritem">
+								<option>1</option>
+								<flag>wxEXPAND|wxALL</flag>
+								<border>5</border>
+								<object class="wxCheckBox" name="cbComplexMaterial">
+									<tooltip>Enables/disables Complex Material shading for Skyrim, where the environment mask texture holds a glossiness map in its green channel and a metalness map in its blue one. Turn this off to render such textures the way vanilla does.</tooltip>
+									<label>Complex Material</label>
+									<checked>1</checked>
+								</object>
+							</object>
+							<object class="sizeritem">
+								<option>1</option>
+								<flag>wxEXPAND|wxALL</flag>
+								<border>5</border>
+								<object class="wxCheckBox" name="cbTruePBR">
+									<tooltip>Enables/disables True PBR shading for Skyrim (Community Shaders), used by shapes with the "Unused 01" shader flag set. Their texture slots hold a roughness/metalness/AO/specular map instead of an environment mask. Turn this off to render such shapes the way vanilla does.</tooltip>
+									<label>True PBR</label>
+									<checked>1</checked>
+								</object>
+							</object>
 						</object>
 					</object>
 					<object class="sizeritem">

@@ -37,6 +37,30 @@ public:
 
 	GLuint GetTexID(uint32_t index);
 	std::string GetTexName(uint32_t index);
+	// Whether the slot exists in this material and resolves to a loaded texture.
+	bool HasTexture(uint32_t index);
 
-	void BindTextures(GLfloat largestAF, const bool hasEnvMapping, const bool hasGlowmap, const bool hasBacklight, const bool hasLightmask);
+	// Whether the texture in the slot was classified as a Complex Material mask.
+	bool IsComplexMaterial(uint32_t index);
+	// Highest mip level the texture in the slot has, 0 for one without a mip chain.
+	int GetTexMaxMipLevel(uint32_t index);
+	// Edge length of the cube map in the slot, 0 for a slot that holds anything else.
+	int GetCubemapSize(uint32_t index);
+	// F0 reflectance a 1x1 cube map in the slot stands for, 1.0 for any other cube map.
+	nifly::Vector3 GetCubemapF0Color(uint32_t index);
+	// Whether the texture in the slot was uploaded in an sRGB format and so samples as linear.
+	bool IsSRGB(uint32_t index);
+
+	// dynamicCubemapID replaces whatever the cube map slot resolved to, including nothing at all.
+	// Whether a shape has earned that is decided by the caller, so passing one here means it has.
+	// isPBR re-reads two slots the way Community Shaders' True PBR fills them rather than the way
+	// vanilla does: slot 5 as an RMAOS map instead of an environment mask, and slot 2 as an emissive
+	// color instead of a glow map. The rest of the layout the two have in common.
+	void BindTextures(GLfloat largestAF,
+					  const bool hasEnvMapping,
+					  const bool hasGlowmap,
+					  const bool hasBacklight,
+					  const bool hasLightmask,
+					  const GLuint dynamicCubemapID = 0,
+					  const bool isPBR = false);
 };

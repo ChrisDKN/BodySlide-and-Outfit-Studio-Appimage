@@ -203,6 +203,8 @@ void GLSurface::Cleanup() {
 		primitiveMat = nullptr;
 	}
 
+	hdri.Clear();
+
 	resLoader.Cleanup();
 }
 
@@ -218,9 +220,11 @@ void GLSurface::SetStartingView(const Vector3& pos, const Vector3& rot, const ui
 	SetSize(vpWidth, vpHeight);
 }
 
-void GLSurface::TurnTableCamera(int dScreenX) {
+float GLSurface::TurnTableCamera(int dScreenX) {
 	float pct = (float)dScreenX / (float)vpW;
-	camRot.y += (pct * 500.0f);
+	float degrees = pct * 500.0f;
+	camRot.y += degrees;
+	return degrees;
 }
 
 void GLSurface::PitchCamera(int dScreenY) {
@@ -368,7 +372,7 @@ Mesh* GLSurface::PickMesh(int ScreenX, int ScreenY) {
 
 	for (auto& m : meshes) {
 		results.clear();
-		if (!m->bVisible || !m->bvh)
+		if (m->bPrimitive || !m->bVisible || !m->bvh)
 			continue;
 
 		GetPickRay(ScreenX, ScreenY, m, d, o);
@@ -807,10 +811,14 @@ void GLSurface::RenderToTexture(GLMaterial* renderShader) {
 	bool oldDS;
 	GLMaterial* oldmat;
 
+	// The render shader draws the meshes in UV space, so it needs the texture coordinate attribute
+	// fed to it. It never passes through UpdateShaders, so say so here.
+	renderShader->GetShader().ShowTexture(true);
+
 	// Render regular meshes only
 	for (size_t i = 0; i < meshes.size(); i++) {
 		m = meshes[i];
-		if (!m->bVisible || m->nTris == 0)
+		if (m->bPrimitive || !m->bVisible || m->nTris == 0)
 			continue;
 
 		oldDS = m->doublesided;
@@ -848,6 +856,15 @@ void GLSurface::RenderOneFrame() {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
 	UpdateProjection();
+
+	if (hdri.IsActive()) {
+		// The environment goes down before anything else and covers the whole viewport, so the clear
+		// color above only ever shows when there is no HDRi. The projection is built here rather
+		// than taken from matProjection because that one is orthographic half the time, and an
+		// orthographic matrix has no divide to unproject a view ray through.
+		const float aspect = static_cast<float>(vpW) / static_cast<float>(vpH);
+		hdri.RenderBackground(glm::perspective(glm::radians(mFov), aspect, zNear, zFar), matView);
+	}
 
 	// Render regular meshes
 	for (auto& m : meshes) {
@@ -904,6 +921,12 @@ void GLSurface::RenderMesh(Mesh* m) {
 	if (!shader.Begin())
 		return;
 
+	// Bind the diffuse if and only if the shader is going to sample it. The condition isn't
+	// recomputed here: whatever the shader was last told (UpdateShaders) is the only thing the
+	// fragment stage acts on, so asking it keeps the two from drifting apart. A program that
+	// samples texDiffuse in a frame where nothing was bound draws the shape as nothing at all.
+	const bool useTexture = shader.IsTextureShown() && m->texcoord != nullptr;
+
 	if (!m->HasAlphaBlend()) {
 		glDepthFunc(GL_LEQUAL);
 		glDepthMask(GL_TRUE);
@@ -929,12 +952,27 @@ void GLSurface::RenderMesh(Mesh* m) {
 	shader.SetSoftlightEnabled(m->softlight);
 	shader.SetGlowmapEnabled(m->glowmap);
 	shader.SetGreyscaleColorEnabled(m->greyscaleColor);
+	shader.SetTintColorEnabled(m->HasTintColor());
+	shader.SetFaceTintEnabled(m->faceTint);
 	shader.SetLightingEnabled(bLighting);
 	shader.SetWireframeEnabled(false);
 	shader.SetNormalMapEnabled(false);
 	shader.SetAlphaMaskEnabled(false);
-	shader.SetCubemapEnabled(m->cubemap);
+	const bool wantsEnvironment = m->WantsEnvironment();
+
+	shader.SetCubemapEnabled(wantsEnvironment);
 	shader.SetEnvMaskEnabled(false);
+	shader.SetRMAOSEnabled(false);
+	shader.SetPBREmissiveEnabled(false);
+	shader.SetComplexMaterialEnabled(bComplexMaterial && m->complexMaterial);
+
+	// A cubemap generated from an HDRi has its own mip chain to blur through, and carries whatever
+	// color the placeholder it replaced stood for. One from a file reflects on its own account.
+	const bool useDynamicCubemap = hdri.IsActive() && wantsEnvironment && m->dynamicCubemap;
+	shader.SetCubemapMaxLod(useDynamicCubemap ? hdri.GetMaxLod() : m->cubemapMaxLod);
+	shader.SetCubemapMinLod(useDynamicCubemap ? GLHDRiEnvironment::GetMinLod() : 0.0f);
+	shader.SetCubemapTint(useDynamicCubemap ? m->cubemapTint : Vector3(1.0f, 1.0f, 1.0f));
+
 	shader.SetProperties(m->prop);
 
 	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
@@ -942,7 +980,8 @@ void GLSurface::RenderMesh(Mesh* m) {
 
 	glBindVertexArray(m->vao);
 
-	if (m->rendermode == Mesh::RenderMode::Normal || m->rendermode == Mesh::RenderMode::LitWire || m->rendermode == Mesh::RenderMode::UnlitSolid) {
+	if (m->rendermode == Mesh::RenderMode::Normal || m->rendermode == Mesh::RenderMode::LitWire || m->rendermode == Mesh::RenderMode::UnlitSolid
+		|| m->rendermode == Mesh::RenderMode::LitSolid) {
 		shader.SetFrontalLight(frontalLight);
 		shader.SetDirectionalLight(directionalLight0, 0);
 		shader.SetDirectionalLight(directionalLight1, 1);
@@ -954,6 +993,7 @@ void GLSurface::RenderMesh(Mesh* m) {
 			glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 		}
 
+		// LitSolid is left with the lighting the viewport toggle asked for above
 		if (m->rendermode == Mesh::RenderMode::UnlitSolid)
 			shader.SetLightingEnabled(false);
 
@@ -993,12 +1033,18 @@ void GLSurface::RenderMesh(Mesh* m) {
 			glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, 0, (GLvoid*)0); // Alpha
 		}
 
-		if (bTextured && m->textured && m->texcoord) {
+		if (useTexture) {
 			glBindBuffer(GL_ARRAY_BUFFER, m->vbo[6]);
 			glEnableVertexAttribArray(6);
 			glVertexAttribPointer(6, 2, GL_FLOAT, GL_FALSE, 0, (GLvoid*)0); // Texture Coordinates
 
-			m->material->BindTextures(largestAF, m->cubemap, m->glowmap, m->backlightMap, m->rimlight || m->softlight);
+			m->material->BindTextures(largestAF,
+									  wantsEnvironment,
+									  m->glowmap,
+									  m->backlightMap,
+									  m->rimlight || m->softlight,
+									  useDynamicCubemap ? hdri.GetCubemapID() : 0,
+									  m->pbr);
 		}
 
 		if (m->mask) {
@@ -1056,7 +1102,7 @@ void GLSurface::RenderMesh(Mesh* m) {
 			}
 		}
 
-		if (bTextured && m->textured && m->texcoord)
+		if (useTexture)
 			glDisableVertexAttribArray(6);
 
 		glDisableVertexAttribArray(5);
@@ -1125,7 +1171,8 @@ void GLSurface::RenderMeshAsPoints(Mesh* m) {
 
 	glBindVertexArray(m->vao);
 
-	if (m->rendermode == Mesh::RenderMode::Normal || m->rendermode == Mesh::RenderMode::LitWire || m->rendermode == Mesh::RenderMode::UnlitSolid) {
+	if (m->rendermode == Mesh::RenderMode::Normal || m->rendermode == Mesh::RenderMode::LitWire || m->rendermode == Mesh::RenderMode::UnlitSolid
+		|| m->rendermode == Mesh::RenderMode::LitSolid) {
 		if (m->bShowPoints && m->mask) {
 			glEnable(GL_PROGRAM_POINT_SIZE);
 			shader.SetAdjustPointSize(true);
@@ -1236,7 +1283,26 @@ void GLSurface::RenderMeshAsPoints(Mesh* m) {
 void GLSurface::UpdateShaders(Mesh* m) {
 	if (m->material) {
 		GLShader& shader = m->material->GetShader();
-		shader.ShowTexture(bTextured && m->textured);
+
+		// Both are properties of the textures the material resolved to, so they're picked up here
+		// rather than per frame. Environment mapping is what puts a Complex Material in play at all:
+		// it's the shader property that gives slot 5 its meaning, not whether the cubemap file for
+		// slot 4 was found - a missing cubemap costs the reflection, not the glossiness.
+		// A True PBR shape is never one: slot 5 holds its RMAOS map, which the classifier would read
+		// as a Complex Material mask given the chance.
+		m->complexMaterial = m->cubemap && !m->pbr && m->material->IsComplexMaterial(5);
+		m->cubemapMaxLod = static_cast<float>(std::min(m->material->GetTexMaxMipLevel(4), 7));
+
+		// A 1x1 cubemap is a placeholder asking for a dynamic one rather than a reflection, and a
+		// cubemap that isn't there leaves a shape that wanted an environment with nothing to reflect
+		// at all - which is every True PBR shape, since those leave slot 4 empty on purpose. Both are
+		// cases an HDRi can stand in for; a cubemap the author actually authored is not.
+		const int cubemapSize = m->material->GetCubemapSize(4);
+		m->dynamicCubemap = m->WantsEnvironment() && (cubemapSize == 1 || !m->material->HasTexture(4));
+		m->cubemapTint = m->material->GetCubemapF0Color(4);
+
+		// Without a diffuse there's nothing to sample, so such meshes are shaded with their mesh color instead.
+		shader.ShowTexture(bTextured && m->textured && m->material->HasTexture(0));
 		shader.ShowLighting(bLighting);
 		shader.ShowMask(bMaskVisible && m->mask);
 		shader.ShowWeight(bWeightColors && m->weight);
@@ -1287,6 +1353,7 @@ Mesh* GLSurface::AddMeshFromNif(NifFile* nif, const std::string& shapeName, Vect
 	}
 
 	NiShader* shader = nif->GetShader(shape);
+	m->hasShader = shader != nullptr;
 	m->bHelperShape = !shader || (shape->flags & 1) != 0;
 	if (shader) {
 		m->doublesided = shader->IsDoubleSided();
@@ -1328,6 +1395,42 @@ Mesh* GLSurface::AddMeshFromNif(NifFile* nif, const std::string& shapeName, Vect
 		m->prop.emissiveMultiple = shader->GetEmissiveMultiple();
 
 		m->prop.alpha = shader->GetAlpha();
+
+		// Everything that has to come off the lighting shader property itself rather than off the
+		// NiShader interface: the tint colors of the shader types that have one, and the True PBR flag.
+		if (!nif->GetHeader().GetVersion().IsSF()) {
+			auto* bslsp = dynamic_cast<BSLightingShaderProperty*>(shader);
+			if (bslsp) {
+				// Community Shaders "True PBR", which a shape asks for with Shader Flags 2 bit 23 - the bit
+				// NifSkope shows as "Unused 01". Only asked of Skyrim: Fallout 4 shares the block type and
+				// spends that bit on something else, and its shapes have their own shader either way.
+				// The multi layer parallax shader type counts alongside the default one, since True PBR
+				// borrows it purely as somewhere to keep its coat, fuzz and glint parameters. Such a shape
+				// still holds its RMAOS map in slot 5, and reading that as one is far closer than falling
+				// back to vanilla, which would take the same map for an environment mask.
+				if (nif->GetHeader().GetVersion().Stream() < 130) {
+					const uint32_t bslspType = bslsp->GetShaderType();
+					m->pbr = (bslsp->shaderFlags2 & SLSF2_UNUSED01) != 0
+							 && (bslspType == BSLightingShaderPropertyShaderType::BSLSP_DEFAULT
+								 || bslspType == BSLightingShaderPropertyShaderType::BSLSP_MULTILAYERPARALLAX);
+
+					if (m->pbr)
+						wxLogMessage("Shape '%s' was detected as a True PBR material.", shapeName);
+				}
+
+				// Face tint map (FaceGen) of the face tint shader type, always in texture slot 6
+				m->faceTint = bslsp->GetShaderType() == BSLightingShaderPropertyShaderType::BSLSP_FACE;
+
+				if (bslsp->GetShaderType() == BSLightingShaderPropertyShaderType::BSLSP_SKINTINT) {
+					m->tintType = Mesh::TintType::Skin;
+					m->prop.tintColor = bslsp->skinTintColor;
+				}
+				else if (bslsp->GetShaderType() == BSLightingShaderPropertyShaderType::BSLSP_HAIRTINT) {
+					m->tintType = Mesh::TintType::Hair;
+					m->prop.tintColor = bslsp->hairTintColor;
+				}
+			}
+		}
 	}
 
 	NiMaterialProperty* material = nif->GetMaterialProperty(shape);
@@ -1490,6 +1593,7 @@ Mesh* GLSurface::AddVisPoint(const Vector3& p, const std::string& name, const Ve
 	m->shapeName = name;
 	m->color = Vector3(0.0f, 1.0f, 1.0f);
 	m->material = GetPrimitiveMaterial();
+	m->bPrimitive = true;
 	m->CreateBuffers();
 
 	AddOverlay(m);
@@ -1533,6 +1637,7 @@ Mesh* GLSurface::AddVisCircle(const Vector3& center, const Vector3& normal, floa
 	m->color = Vector3(1.0f, 0.0f, 0.0f);
 	m->rendermode = Mesh::RenderMode::UnlitWire;
 	m->material = GetPrimitiveMaterial();
+	m->bPrimitive = true;
 
 	float i = 0.0f;
 	for (int j = 0; j < m->nVerts; j++) {
@@ -1607,6 +1712,7 @@ Mesh* GLSurface::AddVis3dSphere(const nifly::Vector3& center, float radius, cons
 		m->shapeName = name;
 		m->rendermode = Mesh::RenderMode::UnlitSolid;
 		m->material = GetPrimitiveMaterial();
+		m->bPrimitive = true;
 
 		if (asMesh)
 			AddMesh(m);
@@ -1674,6 +1780,7 @@ Mesh* GLSurface::AddVis3dRing(const Vector3& center, const Vector3& normal, floa
 		m->shapeName = name;
 		m->rendermode = Mesh::RenderMode::UnlitSolid;
 		m->material = GetPrimitiveMaterial();
+		m->bPrimitive = true;
 
 		AddOverlay(m);
 	}
@@ -1766,6 +1873,7 @@ Mesh* GLSurface::AddVis3dArrow(const Vector3& origin, const Vector3& direction, 
 		m->shapeName = name;
 		m->rendermode = Mesh::RenderMode::UnlitSolid;
 		m->material = GetPrimitiveMaterial();
+		m->bPrimitive = true;
 
 		AddOverlay(m);
 	}
@@ -1874,6 +1982,7 @@ Mesh* GLSurface::AddVis3dCube(const Vector3& center, const Vector3& normal, floa
 		m->shapeName = name;
 		m->rendermode = Mesh::RenderMode::UnlitSolid;
 		m->material = GetPrimitiveMaterial();
+		m->bPrimitive = true;
 
 		AddOverlay(m);
 	}
@@ -1926,6 +2035,7 @@ Mesh* GLSurface::AddVisPlane(const Matrix4& mat, const Vector2& size, float uvSc
 		m->shapeName = name;
 		m->rendermode = Mesh::RenderMode::UnlitSolid;
 		m->material = GetPrimitiveMaterial();
+		m->bPrimitive = true;
 		m->doublesided = true;
 
 		if (asMesh)
@@ -1976,6 +2086,7 @@ Mesh* GLSurface::AddVisEdges(const Mesh* refMesh, const std::vector<Edge>& edges
 	m->shapeName = name;
 	m->color = color;
 	m->material = GetPrimitiveMaterial();
+	m->bPrimitive = true;
 	m->CreateBuffers();
 
 	m->rendermode = Mesh::RenderMode::UnlitWire;
@@ -2019,6 +2130,7 @@ Mesh* GLSurface::AddVisSeg(const Vector3& p1, const Vector3& p2, const std::stri
 	m->shapeName = name;
 	m->color = Vector3(0.0f, 1.0f, 1.0f);
 	m->material = GetPrimitiveMaterial();
+	m->bPrimitive = true;
 	m->CreateBuffers();
 
 	if (asMesh) {
@@ -2097,6 +2209,7 @@ Mesh* GLSurface::AddVisSeamEdges(const Mesh* refMesh, bool asMesh) {
 	m->shapeName = name;
 	m->color = Vector3(1.0f, 1.0f, 0.0f);
 	m->material = GetPrimitiveMaterial();
+	m->bPrimitive = true;
 	m->CreateBuffers();
 
 	if (asMesh) {
@@ -2278,11 +2391,16 @@ Mesh::RenderMode GLSurface::SetMeshRenderMode(const std::string& name, Mesh::Ren
 	return r;
 }
 
-GLMaterial* GLSurface::AddMaterial(const std::vector<std::string>& textureFiles, const std::string& vShaderFile, const std::string& fShaderFile, const bool reloadTextures) {
+GLMaterial* GLSurface::AddMaterial(const std::vector<std::string>& textureFiles,
+								   const std::string& vShaderFile,
+								   const std::string& fShaderFile,
+								   const bool reloadTextures,
+								   const bool useDefaultTexture,
+								   const bool isPBR) {
 	if (!SetContext())
 		return nullptr;
 
-	GLMaterial* mat = resLoader.AddMaterial(textureFiles, vShaderFile, fShaderFile, reloadTextures);
+	GLMaterial* mat = resLoader.AddMaterial(textureFiles, vShaderFile, fShaderFile, reloadTextures, useDefaultTexture, isPBR);
 	if (mat) {
 		std::string shaderError;
 		if (mat->GetShader().GetError(&shaderError)) {
@@ -2292,6 +2410,23 @@ GLMaterial* GLSurface::AddMaterial(const std::vector<std::string>& textureFiles,
 	}
 
 	return mat;
+}
+
+bool GLSurface::SetHDRiBackground(const std::string& fileName) {
+	if (!SetContext())
+		return false;
+
+	std::string error;
+	if (!hdri.Load(fileName.empty() ? fileName : Config["AppDir"] + "/res/hdri/" + fileName, error)) {
+		wxLogError("Failed to load HDRi '%s': %s", fileName, error);
+
+		// A half-loaded environment would leave the cube map slots it stands in for pointing at
+		// nothing, so a failure falls all the way back to no environment at all.
+		hdri.Clear();
+		return false;
+	}
+
+	return true;
 }
 
 GLMaterial* GLSurface::GetPointsMaterial() {

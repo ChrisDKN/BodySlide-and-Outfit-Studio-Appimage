@@ -27,6 +27,11 @@ class GLShader {
 	// Linked Program ID after program creation.
 	GLuint progID = 0;
 
+	// Mirrors the bShowTexture uniform. A freshly linked program has it at false (uniforms start
+	// zeroed), which is also the safe state: a shader that samples a diffuse nobody bound draws
+	// nothing at all, while an unconfigured one just falls back to the mesh color.
+	bool bShowTexture = false;
+
 	/* error state, set if compile/link fails.  check errorstring for compile log
 		-1 = initial state -- not ready
 		0 = no error, shader ready
@@ -40,6 +45,11 @@ class GLShader {
 
 	bool CheckExtensions();
 	bool LoadShaderFile(const std::string& fileName, std::string& text);
+
+	// Gives each sampler uniform of the linked program its fixed texture unit (the layout
+	// GLMaterial::BindTextures uses). Keeps the samplerCube off the unit the sampler2Ds sit on,
+	// which would otherwise make draw calls invalid for programs that never bind textures.
+	void AssignDefaultSamplerUnits();
 
 	// Attempts to load the specified source files (in text format).
 	bool LoadShaders(const std::string& vertexSource, const std::string& fragmentSource);
@@ -84,12 +94,39 @@ public:
 	void ShowVertexColors(bool bShow = true);
 	void ShowVertexAlpha(bool bShow = true);
 	void ShowTexture(bool bShow = true);
+	// Whether the shader samples its diffuse. Callers that have to set up what it samples (texture
+	// coordinates, texture bindings) ask here rather than deriving the condition a second time.
+	bool IsTextureShown() const { return bShowTexture; }
 
 	void SetNormalMapEnabled(const bool enable);
 	void SetAlphaMaskEnabled(const bool enable);
 	void SetGreyscaleColorEnabled(const bool enable);
+	void SetTintColorEnabled(const bool enable);
+	void SetFaceTintEnabled(const bool enable);
 	void SetCubemapEnabled(const bool enable);
 	void SetEnvMaskEnabled(const bool enable);
+	void SetComplexMaterialEnabled(const bool enable);
+	// Whether texture slot 5 resolved to the RMAOS map a True PBR shape keeps there. Without one the
+	// shader falls back to the white Community Shaders substitutes, which describes a fully rough
+	// fully metallic surface.
+	void SetRMAOSEnabled(const bool enable);
+	// Whether texture slot 5's neighbour in slot 2 resolved to the emissive color map of a True PBR
+	// shape, which is not the glow map vanilla keeps in the same slot.
+	void SetPBREmissiveEnabled(const bool enable);
+	// Whether the True PBR base color and emissive maps were uploaded in an sRGB format. The GPU has
+	// decoded those to linear already, and the shader only decodes what it hasn't.
+	void SetDiffuseSRGB(const bool srgb);
+	void SetEmissiveSRGB(const bool srgb);
+	// Highest mip the cubemap can be sampled at, which is how blurry a fully rough Complex Material
+	// reflection gets. Comes from the cubemap's own mip chain, since not every one has a full one.
+	void SetCubemapMaxLod(const float maxLod);
+	// Lowest mip the cubemap is sampled at. A cubemap generated from an HDRi is kept slightly blurred
+	// even at full gloss, which reads as more realistic than a mirror; one from a file is left as
+	// authored and passes 0.
+	void SetCubemapMinLod(const float minLod);
+	// Tints what the cubemap reflects. Carries the sRGB F0 reflectance a 1x1 cubemap stood for before
+	// a generated one replaced it, and is 1.0 for a cubemap that reflects on its own account.
+	void SetCubemapTint(const nifly::Vector3& tint);
 	void SetSpecularEnabled(const bool enable);
 	void SetBacklightEnabled(const bool enable);
 	void SetRimlightEnabled(const bool enable);
@@ -97,6 +134,12 @@ public:
 	void SetGlowmapEnabled(const bool enable);
 	void BindTexture(const GLint& index, const GLuint& texture, const char* samplerName);
 	void BindCubemap(const GLint& index, const GLuint& texture, const char* samplerName);
+
+	// Uniforms that belong to a single pass rather than to the shared mesh vocabulary above. The
+	// HDRi environment passes drive their own shaders and would otherwise each need a named setter
+	// here for a uniform nothing else will ever set.
+	void SetUniform(const char* name, const int value);
+	void SetUniform(const char* name, const float value);
 
 	bool GetError(std::string* errorStr = nullptr);
 

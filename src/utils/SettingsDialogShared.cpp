@@ -97,6 +97,9 @@ void InitCommonSettingsDialog(
 	controls.cbMaskHistory = XRCCTRL(settings, "cbMaskHistory", wxCheckBox);
 	controls.cbMaskHistory->SetValue(config.GetBoolValue("Input/MaskHistory"));
 
+	controls.cbShapeHoverHighlight = XRCCTRL(settings, "cbShapeHoverHighlight", wxCheckBox);
+	controls.cbShapeHoverHighlight->SetValue(config.GetBoolValue("Input/ShapeHoverHighlight"));
+
 	controls.choiceLanguage = XRCCTRL(settings, "choiceLanguage", wxChoice);
 	controls.choiceLanguage->Clear();
 	for (size_t i = 0; i < supportedLangCount; i++)
@@ -109,6 +112,12 @@ void InitCommonSettingsDialog(
 
 	controls.cbPerspectiveView = XRCCTRL(settings, "cbPerspectiveView", wxCheckBox);
 	controls.cbPerspectiveView->SetValue(appConfig.GetBoolValue("Rendering/PerspectiveView", true));
+
+	controls.cbComplexMaterial = XRCCTRL(settings, "cbComplexMaterial", wxCheckBox);
+	controls.cbComplexMaterial->SetValue(appConfig.GetBoolValue("Rendering/ComplexMaterial", true));
+
+	controls.cbTruePBR = XRCCTRL(settings, "cbTruePBR", wxCheckBox);
+	controls.cbTruePBR->SetValue(appConfig.GetBoolValue("Rendering/TruePBR", true));
 
 	controls.cpColorBackground = XRCCTRL(settings, "cpColorBackground", wxColourPickerCtrl);
 	if (config.Exists("Rendering/ColorBackground")) {
@@ -196,6 +205,7 @@ void SaveCommonSettingsDialog(
 	config.SetBoolValue("Input/LeftMousePan", controls.cbLeftMousePan->IsChecked());
 	config.SetBoolValue("Input/BrushSettingsNearCursor", controls.cbBrushSettingsNearCursor->IsChecked());
 	config.SetBoolValue("Input/MaskHistory", controls.cbMaskHistory->IsChecked());
+	config.SetBoolValue("Input/ShapeHoverHighlight", controls.cbShapeHoverHighlight->IsChecked());
 
 	int oldLang = config.GetIntValue("Language");
 	int selection = controls.choiceLanguage->GetSelection();
@@ -218,6 +228,8 @@ void SaveCommonSettingsDialog(
 	config.SetValue(kAppearanceModeConfigKey, GetAppearanceConfigValueForSelection(appearanceSelection));
 
 	appConfig.SetBoolValue("Rendering/PerspectiveView", controls.cbPerspectiveView->IsChecked());
+	appConfig.SetBoolValue("Rendering/ComplexMaterial", controls.cbComplexMaterial->IsChecked());
+	appConfig.SetBoolValue("Rendering/TruePBR", controls.cbTruePBR->IsChecked());
 
 	wxColour colorBackground = controls.cpColorBackground->GetColour();
 	config.SetValue("Rendering/ColorBackground.r", colorBackground.Red());

@@ -31,7 +31,39 @@ private:
 	std::array<bool, 10> queueUpdate = {false};
 
 public:
-	enum class RenderMode { Normal, UnlitSolid, UnlitWire, UnlitWireDepth, UnlitPoints, UnlitPointsDepth, LitWire };
+	enum class RenderMode {
+		// Filled and shaded through the mesh's own material, with its textures, masks and
+		// weight colors. The only mode that stands for a shape of the project, so the
+		// wireframe overlay and everything asking for "the meshes" mean this one.
+		Normal,
+
+		// Filled in the mesh's flat color with no lighting. What the vis primitives are
+		// drawn in - a gizmo reads better as a flat tint than as something in the scene.
+		UnlitSolid,
+
+		// UnlitSolid that keeps its lighting, for a primitive whose shape the eye has to
+		// read: a flat tint says nothing about which way a sphere is turned or how near
+		// its front is. Needs per-vertex normals, which not every primitive builds.
+		LitSolid,
+
+		// The edge list as lines, with the depth test off, so it is drawn over whatever it
+		// crosses however deep in the scene it sits.
+		UnlitWire,
+
+		// UnlitWire that is depth tested, so it goes behind the geometry in front of it.
+		UnlitWireDepth,
+
+		// The vertices as points, with the depth test off, so none of them are hidden.
+		UnlitPoints,
+
+		// UnlitPoints that is depth tested, so points on the far side stay hidden.
+		UnlitPointsDepth,
+
+		// Shaded like Normal but filled as lines and drawn double sided - the see-through
+		// look shapes are given while something else is being worked on in front of them.
+		LitWire
+	};
+	enum class TintType { None, Skin, Hair };
 	enum UpdateType { Position, Normals, Tangents, Bitangents, VertexColors, VertexAlpha, TextureCoordinates, Mask, Weight, Indices };
 
 	struct ShaderProperties {
@@ -43,6 +75,7 @@ public:
 		float envReflection = 1.0f;
 		nifly::Vector3 emissiveColor = nifly::Vector3(1.0f, 1.0f, 1.0f);
 		float emissiveMultiple = 1.0f;
+		nifly::Vector3 tintColor = nifly::Vector3(1.0f, 1.0f, 1.0f); // Skin or hair tint color
 		float alpha = 1.0f;
 		float backlightPower = 0.0f;
 		float rimlightPower = 2.0f;
@@ -121,13 +154,45 @@ public:
 	bool softlight = false;
 	bool glowmap = false;
 	bool greyscaleColor = false;
+	TintType tintType = TintType::None; // Which tint prop.tintColor holds, see HasTintColor()
+	bool faceTint = false;				// Applies the face tint map of texture slot 6
 	bool cubemap = false;
+	// True when the environment mask of texture slot 5 is a Skyrim "Complex Material": glossiness in
+	// its green channel and metalness in its blue one, rather than the greyscale reflection mask
+	// vanilla puts there. Decided once from the texture itself, see ResourceLoader.
+	bool complexMaterial = false;
+	// True when the shape is a Community Shaders "True PBR" material, which it says by setting Shader
+	// Flags 2 bit 23 - the bit NifSkope shows as "Unused 01". Its texture slots hold different maps
+	// than vanilla's: slot 5 an RMAOS map rather than an environment mask, slot 2 an emissive color
+	// rather than a glow map, and slot 4 nothing at all. Such a shape is rendered through its own pair
+	// of shader files, so this is separate from a Complex Material and the two never both apply.
+	bool pbr = false;
+	// Highest mip of the cubemap in slot 4, how blurry a fully rough reflection is allowed to get.
+	float cubemapMaxLod = 0.0f;
+	// True when slot 4 asked to be replaced by a dynamic cubemap: either it holds the 1x1 cubemap
+	// Community Shaders and ENB mods use to mark one, or it holds nothing at all where the shader
+	// property says there is environment mapping. A real cubemap is a reflection the author chose
+	// and is left alone.
+	bool dynamicCubemap = false;
+	// The sRGB F0 reflectance a 1x1 cubemap stood for, which tints what the dynamic one reflects.
+	// Black cubemaps carry no color and come back as full reflectance.
+	nifly::Vector3 cubemapTint = nifly::Vector3(1.0f, 1.0f, 1.0f);
 	bool textured = false;
+	// Whether the shape this mesh came from has a shader block. Shapes without one have no textures to
+	// assign, so they render untextured instead of falling back to the "no image" placeholder. Meshes that
+	// don't come from a NIF shape (import previews, primitives) keep the placeholder behavior.
+	bool hasShader = true;
 
 	std::shared_ptr<AABBTree> bvh = nullptr;
 
 	bool bVisible = true;
 	bool bHelperShape = false; // true for shapes with no shader or with the hidden flag set (e.g. collisions)
+	// True for the meshes the viewport draws for its own sake - the floor grid, the seam
+	// edge lines, the physics collision ball. They sit in the mesh list rather than the
+	// overlay list so that they are depth tested against the scene, but they stand for no
+	// shape in the project, so anything walking the mesh list looking for shapes has to
+	// leave them alone.
+	bool bPrimitive = false;
 	bool bShowPoints = false;
 	bool smoothSeamNormals = true; // Smoothing for normals on seams.
 	float smoothSeamNormalsAngle = 60.0f; // Smoothing threshold in degrees for generating smooth normals on seams.
@@ -165,6 +230,14 @@ public:
 	void UpdateBuffers();
 	void QueueUpdate(const UpdateType& type);
 	void UpdateFromMaterialFile(const MaterialFile& matFile);
+	// Whether prop.tintColor is worth multiplying the albedo by. A black tint can only ever render the
+	// shape as nothing, which is never what a shape means to say: Fallout 4 skin NIFs leave the shader
+	// property's tint at black because the game supplies the actor's own skin tint at runtime.
+	bool HasTintColor() const;
+	// Whether the shape has something to reflect, which is what puts texture slots 4 and 5 in play.
+	// Environment mapping is one way to ask for it; being a True PBR shape is the other, and those say
+	// so with their own flag while leaving environment mapping switched off.
+	bool WantsEnvironment() const { return cubemap || pbr; }
 	bool HasAlphaBlend();
 
 	void ScaleVertices(const nifly::Vector3& center, const float& factor);

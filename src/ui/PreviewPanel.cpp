@@ -6,11 +6,16 @@ See the included LICENSE file
 #include "PreviewPanel.h"
 #include "../files/SFMaterialDatabase.h"
 #include "../files/SFMaterialFile.h"
+#include "../physics/Controller.h"
+#include "../physics/PumpClock.h"
 #include "../program/BodySlideApp.h"
 #include "../utils/PlatformUtil.h"
 
 #include <regex>
+#include <set>
 #include <sstream>
+
+#include <wx/statline.h>
 
 using namespace nifly;
 
@@ -23,7 +28,12 @@ wxBEGIN_EVENT_TABLE(PreviewPanel, wxPanel)
 	EVT_COMMAND_SCROLL(wxID_ANY, PreviewPanel::OnWeightSlider)
 wxEND_EVENT_TABLE()
 
-PreviewPanel::~PreviewPanel() {}
+PreviewPanel::~PreviewPanel() {
+	// The popup hangs off the frame, not off this panel, and its handlers point
+	// back here
+	DestroyPhysicsWindPopup();
+	DestroyAnimationPopup();
+}
 
 PreviewPanel::PreviewPanel(wxWindow* parent, BodySlideApp* app)
 	: wxPanel(parent, wxID_ANY)
@@ -31,7 +41,7 @@ PreviewPanel::PreviewPanel(wxWindow* parent, BodySlideApp* app)
 	, refNormalGenLayers(emptyLayers) {
 
 	wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
-	wxBoxSizer* sizerPanel = new wxBoxSizer(wxHORIZONTAL);
+	wxBoxSizer* sizerToolBar = new wxBoxSizer(wxHORIZONTAL);
 	wxBoxSizer* sizerProjectSelect = new wxBoxSizer(wxHORIZONTAL);
 
 	wxPanel* projectSelectPanel = new wxPanel(this);
@@ -52,33 +62,64 @@ PreviewPanel::PreviewPanel(wxWindow* parent, BodySlideApp* app)
 	projectSelectPanel->SetSizer(sizerProjectSelect);
 	projectSelectPanel->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_3DFACE));
 
-	wxPanel* uiPanel = new wxPanel(this);
-	weightSlider = new wxSlider(uiPanel, wxID_ANY, 100, 0, 100, wxDefaultPosition, wxDefaultSize, wxSL_LABELS, wxDefaultValidator, "weightSlider");
+	toolBarPanel = new wxPanel(this);
+	toolBarPanel->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_3DFACE));
 
-	optButton = new wxButton(uiPanel, wxID_ANY, "N", wxDefaultPosition, FromDIP(wxSize(25, 25)));
+	weightSlider = new wxSlider(toolBarPanel, wxID_ANY, 100, 0, 100, wxDefaultPosition, wxDefaultSize, wxSL_LABELS, wxDefaultValidator, "weightSlider");
+
+	optButton = new wxButton(toolBarPanel, wxID_ANY, "N", wxDefaultPosition, FromDIP(wxSize(28, 28)));
 	optButton->SetToolTip(_("Show the Normal Map Generator dialog."));
 	optButton->Bind(wxEVT_BUTTON, &PreviewPanel::ShowNormalGenWindow, this);
 	optButton->Hide();
 
-	lockShapeButton = new wxButton(uiPanel, wxID_ANY, _("Lock Shape"), wxDefaultPosition, wxDefaultSize);
+	lockShapeButton = new wxButton(toolBarPanel, wxID_ANY, _("Lock Shape"), wxDefaultPosition, wxDefaultSize);
 	lockShapeButton->SetToolTip(_("Set the current preview shape to both low and high weight sliders."));
 	lockShapeButton->Bind(wxEVT_BUTTON, &PreviewPanel::OnLockShape, this);
 	lockShapeButton->Hide();
 
-	showReferenceCheckbox = new wxCheckBox(uiPanel, wxID_ANY, _("Show Reference"), wxDefaultPosition, wxDefaultSize);
+	showReferenceCheckbox = new wxCheckBox(toolBarPanel, wxID_ANY, _("Show Reference"), wxDefaultPosition, wxDefaultSize);
 	showReferenceCheckbox->SetToolTip(_("Show the reference shape from the source project for clipping preview."));
 	showReferenceCheckbox->Bind(wxEVT_CHECKBOX, &PreviewPanel::OnShowReference, this);
 	showReferenceCheckbox->Hide();
 
-	showHelperShapesCheckbox = new wxCheckBox(uiPanel, wxID_ANY, _("Show Helper Shapes"), wxDefaultPosition, wxDefaultSize);
+	showHelperShapesCheckbox = new wxCheckBox(toolBarPanel, wxID_ANY, _("Show Helper Shapes"), wxDefaultPosition, wxDefaultSize);
 	showHelperShapesCheckbox->SetToolTip(_("Show helper shapes (e.g. collisions) - shapes with no shader or with the hidden flag set."));
 	showHelperShapesCheckbox->Bind(wxEVT_CHECKBOX, &PreviewPanel::OnShowHelperShapes, this);
 
-	uiPanel->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_3DFACE));
+	physicsCheckbox = new wxCheckBox(toolBarPanel, wxID_ANY, _("Physics"), wxDefaultPosition, wxDefaultSize);
+	physicsCheckbox->SetToolTip(_("Simulate HDT-SMP physics XMLs referenced by the previewed meshes"));
+	physicsCheckbox->Bind(wxEVT_CHECKBOX, &PreviewPanel::OnPhysics, this);
+	physicsCheckbox->Hide();
 
-	// Pop-out button (placed in uiPanel, below Lock Shape)
+	// The wind settings live in a drop-down so that turning physics on doesn't
+	// re-flow the tool bar around them. The label carries U+25BE as an escape
+	// because the sources are compiled without /utf-8.
+	physicsWindButton = new wxButton(toolBarPanel, wxID_ANY, _("Wind") + wxString(L" \u25BE"), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+	physicsWindButton->SetToolTip(_("Wind settings for the physics preview."));
+	physicsWindButton->Bind(wxEVT_BUTTON, &PreviewPanel::OnPhysicsWindButton, this);
+	physicsWindButton->Hide();
+
+	physicsWindDirIndex = static_cast<int>(Physics::WindDirectionNames().size()) - 1;
+
+	poseLabel = new wxStaticText(toolBarPanel, wxID_ANY, _("Pose"));
+
+	// Filled once the preview is first shown, which is when the poses are
+	// loaded. The fixed minimum width keeps the longest pose name from deciding
+	// the width of the whole preview.
+	poseChoice = new wxChoice(toolBarPanel, wxID_ANY, wxDefaultPosition, FromDIP(wxSize(100, -1)), wxArrayString(), 0, wxDefaultValidator, "poseChoice");
+	poseChoice->SetToolTip(_("Shows the meshes skinned to the skeleton, at rest or in a pose. Without a pose the meshes are shown as they are stored."));
+	poseChoice->Bind(wxEVT_CHOICE, &PreviewPanel::OnPoseChoice, this);
+
+	// Same escape as on the wind button
+	animationButton = new wxButton(toolBarPanel, wxID_ANY, _("Animation") + wxString(L" \u25BE"), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+	animationButton->SetToolTip(_("Play a Havok (HKX) animation on the preview."));
+	animationButton->Bind(wxEVT_BUTTON, &PreviewPanel::OnAnimationButton, this);
+
+	pumpTimer.SetOwner(this);
+	Bind(wxEVT_TIMER, &PreviewPanel::OnPumpTimer, this);
+
 	popoutButton = new wxBitmapButton(
-		uiPanel,
+		toolBarPanel,
 		wxID_ANY,
 		wxBitmap(wxString::FromUTF8(Config["AppDir"]) + "/res/images/PopOut.png", wxBITMAP_TYPE_PNG),
 		wxDefaultPosition,
@@ -90,21 +131,44 @@ PreviewPanel::PreviewPanel(wxWindow* parent, BodySlideApp* app)
 	canvas = new PreviewCanvas(this, GLSurface::GetGLAttribs());
 	context = std::make_unique<wxGLContext>(canvas, nullptr, &GLSurface::GetGLContextAttribs());
 
-	sizerPanel->Add(weightSlider, 1, wxTOP | wxLEFT | wxRIGHT, 10);
+	// Tool bar: weight slider on the left, view options in a left-aligned column
+	// next to it, buttons last. Everything is centered on one baseline so hiding
+	// a control doesn't shift the rest around. The slider gets its own
+	// stretching sizer, which keeps the gap when the slider itself is hidden.
+	wxBoxSizer* sizerWeight = new wxBoxSizer(wxHORIZONTAL);
+	sizerWeight->Add(weightSlider, 1, wxALIGN_CENTER_VERTICAL);
+	sizerToolBar->Add(sizerWeight, 1, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+	sizerToolBar->Add(new wxStaticLine(toolBarPanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLI_VERTICAL), 0, wxEXPAND | wxTOP | wxBOTTOM, 4);
 
-	wxBoxSizer* sizerRight = new wxBoxSizer(wxVERTICAL);
-	sizerRight->Add(showReferenceCheckbox, 0, wxALIGN_CENTER_HORIZONTAL);
+	wxBoxSizer* sizerOptions = new wxBoxSizer(wxVERTICAL);
+	sizerOptions->Add(showReferenceCheckbox, 0, wxBOTTOM, 2);
+	sizerOptions->Add(showHelperShapesCheckbox, 0, wxBOTTOM, 2);
+
+	wxBoxSizer* sizerPhysics = new wxBoxSizer(wxHORIZONTAL);
+	sizerPhysics->Add(physicsCheckbox, 0, wxALIGN_CENTER_VERTICAL);
+	sizerPhysics->Add(physicsWindButton, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, 6);
+	sizerOptions->Add(sizerPhysics, 0);
+
+	sizerToolBar->Add(sizerOptions, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
 
 	wxBoxSizer* sizerButtons = new wxBoxSizer(wxHORIZONTAL);
 	sizerButtons->Add(lockShapeButton, 0, wxALIGN_CENTER_VERTICAL);
 	sizerButtons->Add(popoutButton, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, 4);
-	sizerRight->Add(sizerButtons, 0, wxTOP | wxALIGN_CENTER_HORIZONTAL, 2);
-	sizerRight->Add(showHelperShapesCheckbox, 0, wxTOP | wxALIGN_CENTER_HORIZONTAL, 2);
+	sizerButtons->Add(optButton, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, 4);
+	sizerToolBar->Add(sizerButtons, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
 
-	sizerPanel->Add(sizerRight, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+	// The pose gets a row of its own below, so its long names don't squeeze the
+	// weight slider
+	wxBoxSizer* sizerPose = new wxBoxSizer(wxHORIZONTAL);
+	sizerPose->Add(poseLabel, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, 4);
+	sizerPose->Add(poseChoice, 1, wxALIGN_CENTER_VERTICAL);
+	sizerPose->Add(animationButton, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, 6);
 
-	sizerPanel->Add(optButton, 0, wxALL | wxALIGN_BOTTOM, 10);
-	uiPanel->SetSizer(sizerPanel);
+	wxBoxSizer* sizerToolBarRows = new wxBoxSizer(wxVERTICAL);
+	sizerToolBarRows->Add(sizerToolBar, 0, wxEXPAND);
+	sizerToolBarRows->Add(sizerPose, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
+
+	toolBarPanel->SetSizer(sizerToolBarRows);
 
 	// Loading overlay (hidden by default, positioned over canvas)
 	loadingOverlay = new wxPanel(this, wxID_ANY);
@@ -121,7 +185,7 @@ PreviewPanel::PreviewPanel(wxWindow* parent, BodySlideApp* app)
 	loadingOverlay->Hide();
 
 	sizer->Add(projectSelectPanel, 0, wxEXPAND);
-	sizer->Add(uiPanel, 0, wxEXPAND);
+	sizer->Add(toolBarPanel, 0, wxEXPAND);
 	sizer->Add(canvas, 1, wxEXPAND);
 
 	SetSizer(sizer);
@@ -136,6 +200,65 @@ PreviewPanel::PreviewPanel(wxWindow* parent, BodySlideApp* app)
 
 	projectChoice->Bind(wxEVT_CHOICE, &PreviewPanel::OnProjectChoice, this);
 	presetChoice->Bind(wxEVT_CHOICE, &PreviewPanel::OnPresetChoice, this);
+}
+
+void PreviewPanel::CreatePhysicsWindPopup() {
+	// A popup is a window of its own, owned by the top level window it was
+	// created under. The preview panel moves between the main frame and its own
+	// frame when it's popped out, so the popup has to follow it there.
+	physicsWindPopup = new wxPopupTransientWindow(wxGetTopLevelParent(this), wxBORDER_SIMPLE | wxPU_CONTAINS_CONTROLS);
+
+	wxPanel* windPanel = new wxPanel(physicsWindPopup);
+	windPanel->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+
+	physicsWindSlider = new wxSlider(windPanel, wxID_ANY, physicsWindStrength, 0, 100, wxDefaultPosition, FromDIP(wxSize(140, -1)), wxSL_VALUE_LABEL, wxDefaultValidator, "physicsWindSlider");
+	physicsWindSlider->SetToolTip(_("World wind strength for the physics preview (0 = off)."));
+	physicsWindSlider->Bind(wxEVT_SCROLL_CHANGED, &PreviewPanel::OnPhysicsWind, this);
+	physicsWindSlider->Bind(wxEVT_SCROLL_THUMBTRACK, &PreviewPanel::OnPhysicsWind, this);
+
+	wxArrayString windDirections;
+	for (auto& name : Physics::WindDirectionNames())
+		windDirections.Add(wxGetTranslation(wxString::FromUTF8(name)));
+
+	physicsWindDir = new wxChoice(windPanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, windDirections, 0, wxDefaultValidator, "physicsWindDir");
+	physicsWindDir->SetSelection(physicsWindDirIndex);
+	physicsWindDir->SetToolTip(_("Direction the wind blows in, as seen in the viewport. It stays fixed to the mesh while the camera turns."));
+	physicsWindDir->Bind(wxEVT_CHOICE, &PreviewPanel::OnPhysicsWindDir, this);
+
+	wxFlexGridSizer* sizerWind = new wxFlexGridSizer(2, FromDIP(4), FromDIP(8));
+	sizerWind->AddGrowableCol(1);
+	sizerWind->Add(new wxStaticText(windPanel, wxID_ANY, _("Strength")), 0, wxALIGN_CENTER_VERTICAL);
+	sizerWind->Add(physicsWindSlider, 1, wxEXPAND);
+	sizerWind->Add(new wxStaticText(windPanel, wxID_ANY, _("Direction")), 0, wxALIGN_CENTER_VERTICAL);
+	sizerWind->Add(physicsWindDir, 1, wxEXPAND);
+
+	wxBoxSizer* sizerWindBorder = new wxBoxSizer(wxVERTICAL);
+	sizerWindBorder->Add(sizerWind, 1, wxEXPAND | wxALL, FromDIP(8));
+	windPanel->SetSizerAndFit(sizerWindBorder);
+
+	wxBoxSizer* sizerPopup = new wxBoxSizer(wxVERTICAL);
+	sizerPopup->Add(windPanel, 1, wxEXPAND);
+	physicsWindPopup->SetSizerAndFit(sizerPopup);
+}
+
+void PreviewPanel::DestroyPhysicsWindPopup() {
+	if (!physicsWindPopup)
+		return;
+
+	if (physicsWindPopup->IsShown())
+		physicsWindPopup->Dismiss();
+
+	physicsWindPopup->Destroy();
+	physicsWindPopup = nullptr;
+	physicsWindSlider = nullptr;
+	physicsWindDir = nullptr;
+}
+
+void PreviewPanel::LayoutToolBar() {
+	if (toolBarPanel)
+		toolBarPanel->Layout();
+
+	Layout();
 }
 
 void PreviewPanel::ShowLoadingIndicator(bool show) {
@@ -230,8 +353,12 @@ void PreviewPanel::OnShown() {
 		Config.GetFloatValue("Rendering/PointSizeScale", 0.6f));
 
 	gls.SetPerspective(BodySlideConfig.GetBoolValue("Rendering/PerspectiveView", true));
+	gls.SetComplexMaterialEnabled(BodySlideConfig.GetBoolValue("Rendering/ComplexMaterial", true));
+	gls.SetPBREnabled(BodySlideConfig.GetBoolValue("Rendering/TruePBR", true));
 
 	glInitialized = true;
+
+	RefreshPoseControls();
 
 	// Load deferred project entries
 	if (!projectEntries.empty()) {
@@ -258,25 +385,30 @@ void PreviewPanel::OnShown() {
 }
 
 void PreviewPanel::LoadNifFiles(const std::vector<std::string>& nifFilePaths) {
+	// Every call loads the complete set, so these replace the previous ones
+	std::vector<std::unique_ptr<NifFile>> nifFiles;
+
 	for (const auto& nifPath : nifFilePaths) {
 		std::fstream file;
 		PlatformUtil::OpenFileStream(file, nifPath, std::ios::in | std::ios::binary);
 
-		NifFile* nifFile = new NifFile();
+		auto nifFile = std::make_unique<NifFile>();
 		if (nifFile->Load(file)) {
 			wxLogWarning("Failed to load nif file: %s", nifPath);
-			delete nifFile;
 			continue;
 		}
 
 		wxLogMessage("Loading nif: %s", nifPath);
-		AddMeshFromNif(nifFile);
+		AddMeshFromNif(nifFile.get());
 
 		for (auto& s : nifFile->GetShapeNames())
-			AddNifShapeTextures(nifFile, s);
+			AddNifShapeTextures(nifFile.get(), s);
 
-		delete nifFile;
+		nifFiles.push_back(std::move(nifFile));
 	}
+
+	// The application keeps them, so they can be posed
+	app->SetPreviewLooseNifs(std::move(nifFiles));
 }
 
 void PreviewPanel::SetProjectData(const std::vector<PreviewProjectEntry>& entries, bool loadAll, const std::string& initialPreset) {
@@ -329,8 +461,12 @@ void PreviewPanel::LoadProjects(const std::vector<PreviewProjectEntry>& entries)
 				presetChoice->Append(wxString::FromUTF8(name));
 
 			int idx = presetChoice->FindString(previousPreset);
-			if (idx == wxNOT_FOUND)
+			if (idx == wxNOT_FOUND) {
 				idx = 0;
+
+				if (!previousPreset.IsEmpty())
+					wxLogWarning("Preset '%s' is not available for the loaded project(s), using preset '%s' instead.", previousPreset, presetNames[idx]);
+			}
 
 			presetChoice->SetSelection(idx);
 			presetChoice->Show();
@@ -391,7 +527,7 @@ void PreviewPanel::SetNormalsGenerationLayers(std::vector<NormalGenLayer>& norma
 	if (normalsGenDlg)
 		normalsGenDlg->Hide();
 
-	Layout();
+	LayoutToolBar();
 }
 
 Mesh* PreviewPanel::GetMesh(const std::string& shapeName) {
@@ -457,37 +593,53 @@ void PreviewPanel::RefreshMeshFromNif(const std::vector<NifFile*>& nifs) {
 	gls.RenderOneFrame();
 }
 
-SFMaterialDatabase* PreviewPanel::GetSFMaterialDatabase() {
-	if (sfMaterialDb)
-		return sfMaterialDb->Failed() ? nullptr : sfMaterialDb.get();
+bool PreviewPanel::GetSFMaterialJSON(const std::string& matPath, std::string& jsonOutput) {
+	if ((TargetGame)Config.GetIntValue("TargetGame") != SF)
+		return false;
 
-	sfMaterialDb = std::make_unique<SFMaterialDatabase>();
+	if (!sfMaterialDbsLoaded) {
+		sfMaterialDbsLoaded = true;
 
-	wxMemoryBuffer data;
-	for (FSArchiveFile* archive : FSManager::archiveList()) {
-		if (archive && archive->hasFile("materials/materialsbeta.cdb")) {
-			wxMemoryBuffer outData;
-			archive->fileContents("materials/materialsbeta.cdb", outData);
-			if (!outData.IsEmpty()) {
-				data = std::move(outData);
-				break;
-			}
+		std::set<std::string> seen;
+		for (FSArchiveFile* archive : FSManager::archiveList()) {
+			if (!archive)
+				continue;
+
+			auto tryLoad = [&](const std::string& cdbPath) {
+				if (!seen.insert(cdbPath).second)
+					return;
+
+				wxMemoryBuffer data;
+				archive->fileContents(cdbPath, data);
+				if (data.IsEmpty())
+					return;
+
+				auto db = std::make_unique<SFMaterialDatabase>();
+				sfMaterialDbContents.emplace_back(static_cast<const char*>(data.GetData()), data.GetDataLen());
+				sfMaterialDbStreams.push_back(std::make_unique<std::istringstream>(sfMaterialDbContents.back(), std::ios::in | std::ios::binary));
+
+				if (db->Load(*sfMaterialDbStreams.back()) && !db->Failed()) {
+					sfMaterialDbs.push_back(std::move(db));
+				}
+				else {
+					sfMaterialDbContents.pop_back();
+					sfMaterialDbStreams.pop_back();
+				}
+			};
+
+			std::vector<std::string> matches;
+			archive->findFilesBySuffix("materials/", ".cdb", matches);
+			for (const auto& match : matches)
+				tryLoad(match);
 		}
 	}
 
-	if (data.IsEmpty())
-		return nullptr;
-
-	sfMaterialDbContent.assign(static_cast<const char*>(data.GetData()), data.GetDataLen());
-	sfMaterialDbStream = std::make_unique<std::istringstream>(sfMaterialDbContent, std::ios::in | std::ios::binary);
-
-	if (!sfMaterialDb->Load(*sfMaterialDbStream) || sfMaterialDb->Failed()) {
-		sfMaterialDbContent.clear();
-		sfMaterialDbStream.reset();
-		return nullptr;
+	for (auto& db : sfMaterialDbs) {
+		if (db->GetMaterialJSON(matPath, jsonOutput))
+			return true;
 	}
 
-	return sfMaterialDb.get();
+	return false;
 }
 
 void PreviewPanel::AddNifShapeTextures(NifFile* fromNif, const std::string& shapeName) {
@@ -554,8 +706,7 @@ void PreviewPanel::AddNifShapeTextures(NifFile* fromNif, const std::string& shap
 
 				if (!resolvedFromArchive) {
 					std::string materialJson;
-					SFMaterialDatabase* cdb = GetSFMaterialDatabase();
-					if (cdb && cdb->GetMaterialJSON(matFile, materialJson)) {
+					if (GetSFMaterialJSON(matFile, materialJson)) {
 						std::istringstream materialStream(materialJson);
 						SFMaterialFile cdbMat(materialStream);
 						if (!cdbMat.Failed())
@@ -649,6 +800,7 @@ void PreviewPanel::AddNifShapeTextures(NifFile* fromNif, const std::string& shap
 
 	std::string vShader = Config["AppDir"] + "/res/shaders/default.vert";
 	std::string fShader = Config["AppDir"] + "/res/shaders/default.frag";
+	bool renderAsPBR = false;
 
 	TargetGame targetGame = (TargetGame)Config.GetIntValue("TargetGame");
 	if (targetGame == FO4 || targetGame == FO4VR || targetGame == FO76) {
@@ -663,8 +815,18 @@ void PreviewPanel::AddNifShapeTextures(NifFile* fromNif, const std::string& shap
 		vShader = Config["AppDir"] + "/res/shaders/ob_default.vert";
 		fShader = Config["AppDir"] + "/res/shaders/ob_default.frag";
 	}
+	else {
+		// A True PBR shape reads its texture slots differently enough from every other Skyrim shape
+		// that it gets its own pair rather than another branch inside the shared one.
+		Mesh* m = gls.GetMesh(shapeName);
+		if (m && m->pbr && gls.IsPBREnabled()) {
+			vShader = Config["AppDir"] + "/res/shaders/sk_truepbr.vert";
+			fShader = Config["AppDir"] + "/res/shaders/sk_truepbr.frag";
+			renderAsPBR = true;
+		}
+	}
 
-	SetShapeTextures(shapeName, texFiles, vShader, fShader, hasMat, mat);
+	SetShapeTextures(shapeName, texFiles, vShader, fShader, hasMat, mat, renderAsPBR);
 }
 
 void PreviewPanel::RenderNormalMap(const std::string& outfilename) {
@@ -706,8 +868,9 @@ void PreviewPanel::RenderNormalMap(const std::string& outfilename) {
 }
 
 void PreviewPanel::RightDrag(int dX, int dY) {
-	gls.TurnTableCamera(dX);
+	const float yawDegrees = gls.TurnTableCamera(dX);
 	gls.PitchCamera(dY);
+	app->InjectPreviewCameraYaw(yawDegrees);
 	gls.RenderOneFrame();
 }
 
@@ -727,6 +890,13 @@ void PreviewPanel::MouseWheel(int dW) {
 }
 
 void PreviewPanel::OnWeightSlider(wxScrollEvent& event) {
+	// The panel catches scroll events of any id, so make sure this is the weight
+	// slider and not one of the other sliders on it
+	if (event.GetEventObject() != weightSlider) {
+		event.Skip();
+		return;
+	}
+
 	weight = event.GetPosition();
 	app->UpdatePreview();
 }
@@ -748,14 +918,399 @@ void PreviewPanel::OnShowHelperShapes(wxCommandEvent& WXUNUSED(event)) {
 	gls.RenderOneFrame();
 }
 
+void PreviewPanel::ShowPhysicsControls(bool show) {
+	if (!physicsCheckbox)
+		return;
+
+	physicsCheckbox->Show(show);
+	if (!show)
+		SetPhysicsChecked(false);
+
+	LayoutToolBar();
+}
+
+void PreviewPanel::SetPhysicsChecked(bool checked) {
+	if (!physicsCheckbox)
+		return;
+
+	physicsCheckbox->SetValue(checked);
+
+	// Wind is meaningless without a running simulation
+	const bool showWind = checked && physicsCheckbox->IsShown();
+	if (physicsWindButton)
+		physicsWindButton->Show(showWind);
+
+	if (!showWind)
+		DestroyPhysicsWindPopup();
+
+	LayoutToolBar();
+}
+
+void PreviewPanel::ApplyPhysicsWind() {
+	app->SetPreviewWind(physicsWindDirIndex, physicsWindStrength);
+}
+
+void PreviewPanel::OnPhysics(wxCommandEvent& event) {
+	app->EnablePreviewPhysics(event.IsChecked());
+
+	// The simulation refuses to start without usable XMLs, so take the state
+	// from it instead of from the click
+	SetPhysicsChecked(app->IsPreviewPhysicsRunning());
+	ApplyPhysicsWind();
+}
+
+void PreviewPanel::OnPhysicsWindButton(wxCommandEvent& WXUNUSED(event)) {
+	if (!physicsWindButton)
+		return;
+
+	// Popping the preview out moves it to a different window, leaving the popup
+	// behind on the old one
+	if (physicsWindPopup && physicsWindPopup->GetParent() != wxGetTopLevelParent(this))
+		DestroyPhysicsWindPopup();
+
+	if (!physicsWindPopup)
+		CreatePhysicsWindPopup();
+
+	// Drop it down from the button, flipping to above it near the screen edge
+	physicsWindPopup->Position(physicsWindButton->GetScreenPosition(), physicsWindButton->GetSize());
+	physicsWindPopup->Popup();
+}
+
+void PreviewPanel::OnPhysicsWind(wxScrollEvent& WXUNUSED(event)) {
+	if (!physicsWindSlider)
+		return;
+
+	physicsWindStrength = physicsWindSlider->GetValue();
+	ApplyPhysicsWind();
+}
+
+void PreviewPanel::OnPhysicsWindDir(wxCommandEvent& WXUNUSED(event)) {
+	if (!physicsWindDir)
+		return;
+
+	physicsWindDirIndex = physicsWindDir->GetSelection();
+	ApplyPhysicsWind();
+}
+
+void PreviewPanel::Pump() {
+	app->PumpPreview();
+}
+
+void PreviewPanel::SetPumpActive(bool active) {
+	if (active == pumpTimer.IsRunning())
+		return;
+
+	if (active)
+		pumpTimer.Start(Physics::PumpTimerIntervalMS);
+	else
+		pumpTimer.Stop();
+}
+
+void PreviewPanel::OnPumpTimer(wxTimerEvent& WXUNUSED(event)) {
+	Pump();
+}
+
+void PreviewPanel::RefreshPoseControls() {
+	if (!poseChoice)
+		return;
+
+	poseChoice->Freeze();
+	poseChoice->Clear();
+	poseChoice->Append(_("No pose"));
+	poseChoice->Append(_("Skinned (rest pose)"));
+	for (auto& name : app->GetPreviewPoseNames())
+		poseChoice->Append(wxString::FromUTF8(name));
+
+	poseChoice->SetSelection(app->GetPreviewPose());
+	poseChoice->Thaw();
+
+	if (animationButton) {
+		animationButton->Show(app->CanLoadPreviewAnimations());
+		if (!animationButton->IsShown())
+			DestroyAnimationPopup();
+	}
+
+	PopulateAnimationChoice();
+	SyncAnimationControls();
+	LayoutToolBar();
+}
+
+void PreviewPanel::SyncAnimationControls() {
+	// An animation decides the pose for as long as it's selected
+	const bool hasAnimation = app->GetPreviewAnimation() >= 0;
+	if (poseChoice && poseChoice->IsEnabled() == hasAnimation)
+		poseChoice->Enable(!hasAnimation);
+
+	if (!animationPopup)
+		return;
+
+	if (animationFavoriteButton) {
+		const bool favorite = app->IsPreviewAnimationFavorite(app->GetPreviewAnimation());
+		if (animationFavoriteButton->IsEnabled() != hasAnimation || animationFavoriteShown != favorite) {
+			animationFavoriteShown = favorite;
+			animationFavoriteButton->SetBitmap(wxBitmap(wxString::FromUTF8(Config["AppDir"] + (favorite ? FavoriteStarIcon : FavoriteStarEmptyIcon)), wxBITMAP_TYPE_PNG));
+			animationFavoriteButton->Enable(hasAnimation);
+		}
+	}
+
+	const int numFrames = static_cast<int>(app->GetPreviewAnimationFrameCount());
+	const int frame = numFrames > 0 ? std::min(app->GetPreviewAnimationFrame(), numFrames - 1) : 0;
+
+	if (animationPlayButton) {
+		const wxString label = app->IsPreviewAnimationPlaying() ? _("Pause") : _("Play");
+		if (animationPlayButton->GetLabel() != label)
+			animationPlayButton->SetLabel(label);
+		animationPlayButton->Enable(numFrames > 0);
+	}
+
+	if (animationFrameSlider) {
+		const int maxFrame = numFrames > 1 ? numFrames - 1 : 1;
+		if (animationFrameSlider->GetMax() != maxFrame)
+			animationFrameSlider->SetRange(0, maxFrame);
+		if (animationFrameSlider->GetValue() != frame)
+			animationFrameSlider->SetValue(frame);
+		animationFrameSlider->Enable(numFrames > 1);
+	}
+
+	if (animationFrameText) {
+		const wxString text = numFrames > 0 ? wxString::Format("%d / %d", frame + 1, numFrames) : wxString("-");
+		if (animationFrameText->GetLabel() != text)
+			animationFrameText->SetLabel(text);
+	}
+
+	if (animationInterpolateCheck)
+		animationInterpolateCheck->Enable(numFrames > 1);
+}
+
+void PreviewPanel::PopulateAnimationChoice() {
+	if (!animationChoice)
+		return;
+
+	animationChoice->Freeze();
+	animationChoice->Clear();
+	animationChoice->Append(_("<None>"));
+
+	// Favorites carry the same star as favorite outfits and presets
+	auto names = app->GetPreviewAnimationNames();
+	for (size_t i = 0; i < names.size(); i++) {
+		wxString label = wxString::FromUTF8(names[i]);
+		if (app->IsPreviewAnimationFavorite(static_cast<int>(i)))
+			label = wxString::FromUTF8(FavoriteStar) + " " + label;
+
+		animationChoice->Append(label);
+	}
+
+	animationChoice->SetSelection(app->GetPreviewAnimation() + 1);
+	animationChoice->Thaw();
+}
+
+void PreviewPanel::CreateAnimationPopup() {
+	// Hangs off the top level window like the wind drop-down, see there
+	animationPopup = new wxPopupTransientWindow(wxGetTopLevelParent(this), wxBORDER_SIMPLE | wxPU_CONTAINS_CONTROLS);
+
+	wxPanel* animPanel = new wxPanel(animationPopup);
+	animPanel->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+
+	animationChoice = new wxChoice(animPanel, wxID_ANY, wxDefaultPosition, FromDIP(wxSize(200, -1)), wxArrayString(), 0, wxDefaultValidator, "animationChoice");
+	animationChoice->SetToolTip(_("The animation playing on the preview. While one is selected, it decides the pose."));
+	animationChoice->Bind(wxEVT_CHOICE, &PreviewPanel::OnAnimationChoice, this);
+
+	animationFavoriteButton = new wxBitmapButton(animPanel,
+												 wxID_ANY,
+												 wxBitmap(wxString::FromUTF8(Config["AppDir"] + FavoriteStarEmptyIcon), wxBITMAP_TYPE_PNG),
+												 wxDefaultPosition,
+												 FromDIP(wxSize(24, 24)));
+	animationFavoriteShown = false;
+	animationFavoriteButton->SetToolTip(_("Favorite this animation. Favorites are listed in BodySlide and Outfit Studio without loading them again."));
+	animationFavoriteButton->Bind(wxEVT_BUTTON, &PreviewPanel::OnAnimationFavorite, this);
+
+	wxButton* loadButton = new wxButton(animPanel, wxID_ANY, _("Load HKX..."), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+	loadButton->SetToolTip(_("Load a Havok animation file (.hkx). It's read against the .hkx skeleton next to the reference skeleton."));
+	loadButton->Bind(wxEVT_BUTTON, &PreviewPanel::OnLoadAnimation, this);
+
+	// Default size, so the button fits "Pause" as well as "Play"
+	animationPlayButton = new wxButton(animPanel, wxID_ANY, _("Play"));
+	animationPlayButton->Bind(wxEVT_BUTTON, &PreviewPanel::OnAnimationPlayPause, this);
+
+	animationFrameSlider = new wxSlider(animPanel, wxID_ANY, 0, 0, 1, wxDefaultPosition, FromDIP(wxSize(160, -1)), wxSL_HORIZONTAL, wxDefaultValidator, "animationFrameSlider");
+	animationFrameSlider->Bind(wxEVT_SCROLL_CHANGED, &PreviewPanel::OnAnimationFrame, this);
+	animationFrameSlider->Bind(wxEVT_SCROLL_THUMBTRACK, &PreviewPanel::OnAnimationFrame, this);
+
+	animationFrameText = new wxStaticText(animPanel, wxID_ANY, "-", wxDefaultPosition, FromDIP(wxSize(60, -1)));
+
+	// Matches the speeds of Outfit Studio's animation player
+	wxArrayString speeds;
+	speeds.Add("0.25x");
+	speeds.Add("0.5x");
+	speeds.Add("1x");
+	speeds.Add("1.5x");
+	speeds.Add("2x");
+
+	wxChoice* speedChoice = new wxChoice(animPanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, speeds, 0, wxDefaultValidator, "animationSpeed");
+	speedChoice->SetSelection(animationSpeedIndex);
+	speedChoice->Bind(wxEVT_CHOICE, &PreviewPanel::OnAnimationSpeed, this);
+
+	animationInterpolateCheck = new wxCheckBox(animPanel, wxID_ANY, _("Interpolate"));
+	animationInterpolateCheck->SetValue(app->IsPreviewAnimationInterpolated());
+	animationInterpolateCheck->SetToolTip(_("Blend between frames for smooth playback."));
+	animationInterpolateCheck->Bind(wxEVT_CHECKBOX, &PreviewPanel::OnAnimationInterpolate, this);
+
+	wxBoxSizer* sizerChoice = new wxBoxSizer(wxHORIZONTAL);
+	sizerChoice->Add(animationChoice, 1, wxALIGN_CENTER_VERTICAL);
+	sizerChoice->Add(animationFavoriteButton, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, FromDIP(4));
+	sizerChoice->Add(loadButton, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, FromDIP(6));
+
+	wxBoxSizer* sizerPlayer = new wxBoxSizer(wxHORIZONTAL);
+	sizerPlayer->Add(animationPlayButton, 0, wxALIGN_CENTER_VERTICAL);
+	sizerPlayer->Add(animationFrameSlider, 1, wxLEFT | wxALIGN_CENTER_VERTICAL, FromDIP(4));
+	sizerPlayer->Add(animationFrameText, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, FromDIP(4));
+
+	wxBoxSizer* sizerOptions = new wxBoxSizer(wxHORIZONTAL);
+	sizerOptions->Add(new wxStaticText(animPanel, wxID_ANY, _("Speed")), 0, wxALIGN_CENTER_VERTICAL);
+	sizerOptions->Add(speedChoice, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, FromDIP(4));
+	sizerOptions->Add(animationInterpolateCheck, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, FromDIP(12));
+
+	wxBoxSizer* sizerAnim = new wxBoxSizer(wxVERTICAL);
+	sizerAnim->Add(sizerChoice, 0, wxEXPAND | wxBOTTOM, FromDIP(6));
+	sizerAnim->Add(sizerPlayer, 0, wxEXPAND | wxBOTTOM, FromDIP(6));
+	sizerAnim->Add(sizerOptions, 0, wxEXPAND);
+
+	wxBoxSizer* sizerAnimBorder = new wxBoxSizer(wxVERTICAL);
+	sizerAnimBorder->Add(sizerAnim, 1, wxEXPAND | wxALL, FromDIP(8));
+	animPanel->SetSizerAndFit(sizerAnimBorder);
+
+	wxBoxSizer* sizerPopup = new wxBoxSizer(wxVERTICAL);
+	sizerPopup->Add(animPanel, 1, wxEXPAND);
+	animationPopup->SetSizerAndFit(sizerPopup);
+
+	PopulateAnimationChoice();
+	SyncAnimationControls();
+}
+
+void PreviewPanel::DestroyAnimationPopup() {
+	if (!animationPopup)
+		return;
+
+	if (animationPopup->IsShown())
+		animationPopup->Dismiss();
+
+	animationPopup->Destroy();
+	animationPopup = nullptr;
+	animationChoice = nullptr;
+	animationFavoriteButton = nullptr;
+	animationPlayButton = nullptr;
+	animationFrameSlider = nullptr;
+	animationFrameText = nullptr;
+	animationInterpolateCheck = nullptr;
+}
+
+void PreviewPanel::OnPoseChoice(wxCommandEvent& WXUNUSED(event)) {
+	app->SetPreviewPose(poseChoice->GetSelection());
+}
+
+void PreviewPanel::OnAnimationButton(wxCommandEvent& WXUNUSED(event)) {
+	if (!animationButton)
+		return;
+
+	// See OnPhysicsWindButton
+	if (animationPopup && animationPopup->GetParent() != wxGetTopLevelParent(this))
+		DestroyAnimationPopup();
+
+	if (!animationPopup)
+		CreateAnimationPopup();
+
+	animationPopup->Position(animationButton->GetScreenPosition(), animationButton->GetSize());
+	animationPopup->Popup();
+}
+
+void PreviewPanel::OnAnimationChoice(wxCommandEvent& WXUNUSED(event)) {
+	if (!animationChoice)
+		return;
+
+	std::string error;
+	bool selected = false;
+	{
+		// A favorite is only read now
+		wxBusyCursor busy;
+		selected = app->SetPreviewAnimation(animationChoice->GetSelection() - 1, &error);
+	}
+
+	if (!selected) {
+		animationChoice->SetSelection(app->GetPreviewAnimation() + 1);
+		wxMessageBox(wxString::FromUTF8(error), _("Load Animation File"), wxOK | wxICON_ERROR, this);
+	}
+
+	SyncAnimationControls();
+}
+
+void PreviewPanel::OnAnimationFavorite(wxCommandEvent& WXUNUSED(event)) {
+	const int animIndex = app->GetPreviewAnimation();
+	if (animIndex < 0)
+		return;
+
+	app->SetPreviewAnimationFavorite(animIndex, !app->IsPreviewAnimationFavorite(animIndex));
+
+	PopulateAnimationChoice();
+	SyncAnimationControls();
+}
+
+void PreviewPanel::OnLoadAnimation(wxCommandEvent& WXUNUSED(event)) {
+	// The file dialog takes the focus, which closes the drop-down anyway
+	if (animationPopup && animationPopup->IsShown())
+		animationPopup->Dismiss();
+
+	wxFileDialog loadDlg(this, _("Select animation file"), wxEmptyString, wxEmptyString, "HKX animation files (*.hkx)|*.hkx", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+	if (loadDlg.ShowModal() == wxID_CANCEL)
+		return;
+
+	std::string error;
+	bool loaded = false;
+	{
+		wxBusyCursor busy;
+		loaded = app->LoadPreviewAnimation(loadDlg.GetPath().ToUTF8().data(), error);
+	}
+
+	if (!loaded)
+		wxMessageBox(wxString::FromUTF8(error), _("Load Animation File"), wxOK | wxICON_ERROR, this);
+
+	PopulateAnimationChoice();
+	SyncAnimationControls();
+}
+
+void PreviewPanel::OnAnimationPlayPause(wxCommandEvent& WXUNUSED(event)) {
+	app->SetPreviewAnimationPlaying(!app->IsPreviewAnimationPlaying());
+	SyncAnimationControls();
+}
+
+void PreviewPanel::OnAnimationFrame(wxScrollEvent& event) {
+	app->SeekPreviewAnimation(event.GetPosition());
+	SyncAnimationControls();
+}
+
+void PreviewPanel::OnAnimationSpeed(wxCommandEvent& event) {
+	static const double speeds[] = {0.25, 0.5, 1.0, 1.5, 2.0};
+
+	animationSpeedIndex = event.GetSelection();
+	if (animationSpeedIndex < 0 || animationSpeedIndex >= static_cast<int>(std::size(speeds)))
+		animationSpeedIndex = 2;
+
+	app->SetPreviewAnimationSpeed(speeds[animationSpeedIndex]);
+}
+
+void PreviewPanel::OnAnimationInterpolate(wxCommandEvent& event) {
+	app->SetPreviewAnimationInterpolate(event.IsChecked());
+}
+
 void PreviewPanel::OnPopout(wxCommandEvent& WXUNUSED(event)) {
 	wxCommandEvent evt(EVT_PREVIEW_POPOUT);
 	wxPostEvent(GetParent(), evt);
 }
 
 void PreviewPanel::ShowPopoutButton(bool show) {
-	if (popoutButton)
+	if (popoutButton) {
 		popoutButton->Show(show);
+		LayoutToolBar();
+	}
 }
 
 void PreviewPanel::SetPopoutButtonDetachedState(bool detached) {
@@ -783,6 +1338,10 @@ void PreviewPanel::ShowNormalGenWindow(wxCommandEvent& WXUNUSED(event)) {
 }
 
 void PreviewPanel::Cleanup() {
+	pumpTimer.Stop();
+	DestroyPhysicsWindPopup();
+	SyncAnimationControls();
+
 	if (canvas && context)
 		canvas->SetCurrent(*context);
 
@@ -829,6 +1388,10 @@ void PreviewCanvas::OnMotion(wxMouseEvent& event) {
 		if (topLevel && topLevel->IsActive())
 			SetFocus();
 	}
+
+	// Mouse motion floods the message queue and starves the WM_TIMER driving the
+	// physics, so tick it from here as well (the pump paces itself)
+	previewPanel->Pump();
 
 	auto delta = event.GetPosition() - lastMousePosition;
 

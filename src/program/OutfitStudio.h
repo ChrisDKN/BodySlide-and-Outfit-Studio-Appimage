@@ -22,6 +22,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "../components/RefTemplates.h"
 #include "../components/TweakBrush.h"
 #include "../components/UndoHistory.h"
+#include "../physics/Controller.h"
+#include "../physics/PumpClock.h"
 #include "../render/GLSurface.h"
 #include "../ui/WeightCopyDialog.h"
 #include "../ui/wxSliderPanel.h"
@@ -56,6 +58,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <wx/splitter.h>
 #include <wx/srchctrl.h>
 #include <wx/stdpaths.h>
+#include <wx/stopwatch.h>
+#include <wx/timer.h>
 #include <wx/tokenzr.h>
 #include <wx/treectrl.h>
 #include <wx/wizard.h>
@@ -67,6 +71,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #endif
 
 enum TargetGame { FO3, FONV, SKYRIM, FO4, SKYRIMSE, FO4VR, SKYRIMVR, FO76, OB, SF };
+
+#define ANIM_PLAYBACK_TIMER 300
+#define PHYSICS_TIMER 301
 
 struct MergeCheckErrors;
 
@@ -266,6 +273,20 @@ public:
 	void EndPickEdge();
 	void ClickFlipEdge();
 	void ClickSplitEdge();
+
+	// Takes hold of the running physics simulation where the cursor points and
+	// drags it around, without touching the mesh data. Start fails when the
+	// cursor is not over a shape the simulation moves, leaving the click to the
+	// tool that would otherwise have had it.
+	bool StartPhysicsGrab(const wxPoint& screenPos);
+	void UpdatePhysicsGrab(const wxPoint& screenPos);
+	void EndPhysicsGrab();
+
+	// Draws (or removes) the ball the running simulation collides with, at a
+	// position and radius given in NIF units. Placing it is the frame's job -
+	// this only shows where it ended up.
+	void ShowPhysicsProbe(const nifly::Vector3& nifPos, float nifRadius);
+	void HidePhysicsProbe();
 
 	bool StartMoveVertex(const wxPoint& screenPos);
 	void UpdateMoveVertex(const wxPoint& screenPos);
@@ -480,7 +501,8 @@ public:
 
 	void ClearMasks() {
 		for (auto& m : gls.GetMeshes())
-			m->MaskFill(0.0f);
+			if (!m->bPrimitive)
+				m->MaskFill(0.0f);
 	}
 
 	void ClearActiveMask() {
@@ -490,7 +512,8 @@ public:
 
 	void ClearColors() {
 		for (auto& m : gls.GetMeshes())
-			m->ColorFill(nifly::Vector3());
+			if (!m->bPrimitive)
+				m->ColorFill(nifly::Vector3());
 	}
 
 	void ClearActiveColors() {
@@ -703,6 +726,16 @@ public:
 		gls.RenderOneFrame();
 	}
 
+	// Loads an HDRi from res/hdri as the environment, empty for none. Also changes what shapes with a
+	// dynamic cubemap reflect, but not the meshes or their textures.
+	bool SetHDRiBackground(const std::string& fileName) {
+		const bool loaded = gls.SetHDRiBackground(fileName);
+		gls.RenderOneFrame();
+		return loaded;
+	}
+
+	bool HasHDRiBackground() const { return gls.HasHDRiBackground(); }
+
 	void Render() { gls.RenderOneFrame(); }
 
 	// Hover highlight: overlays a light green copy of the given shape's mesh.
@@ -770,6 +803,20 @@ private:
 	int edgeSlideTarget = -1;
 	bool edgeSlideHasUV = false;
 
+	// Where a physics grab took hold and the plane it reads the cursor
+	// against, both in model space. The simulation pulls the grabbed patch out
+	// from under the cursor immediately, so there is nothing left to hit-test
+	// against - the move brush freezes a plane for the same reason.
+	nifly::Vector3 physicsGrabStart;
+	nifly::Vector3 physicsGrabPlaneNormal;
+	float physicsGrabPlaneDist = 0.0f;
+
+	// Fills "outTargets" with the physics bones holding the patch of "m"
+	// around "meshPos", each weighted by how much of the patch it carries.
+	bool CollectPhysicsGrabTargets(Mesh* m, const nifly::Vector3& meshPos, std::vector<Physics::GrabTarget>& outTargets);
+	void ShowPhysicsGrabMarker(const nifly::Vector3& modelPos);
+	void HidePhysicsGrabMarker();
+
 	std::set<Mesh*> BVHUpdateQueue;
 
 	OutfitStudioFrame* os = nullptr;
@@ -804,6 +851,7 @@ private:
 	bool isPickingEdge = false;
 	bool isMovingVertex = false;
 	bool isSlidingEdge = false;
+	bool isPhysicsGrabbing = false;
 	bool toolOptionXMirror = true;
 	bool toolOptionXMirrorWeight = false;
 	bool toolOptionConnectedOnly = false;
@@ -979,6 +1027,47 @@ public:
 
 	const std::vector<RefTemplate>& GetRefTemplates() const { return refTemplates; }
 
+	// True while an HKX animation is being played back; all editing is locked
+	// for the duration.
+	bool IsAnimationPlaying() const { return animPlaying; }
+
+	// Advances playback to whatever frame the wall clock says is due. Safe to
+	// call from any event source: the frame comes from elapsed time rather than
+	// a tick count, so the speed stays correct however often it arrives.
+	void PumpAnimationPlayback();
+
+	// Feeds a horizontal camera rotation into the physics preview so cloth
+	// and hair react as if the character turned under a fixed camera. No-op
+	// while physics is not simulating.
+	void InjectPhysicsCameraYaw(float deltaDegrees);
+
+	// The per-frame physics tick while physics runs without animation
+	// playback; while an animation plays, ApplyPose steps the simulation in
+	// lockstep instead. Internally paced, so like PumpAnimationPlayback it is
+	// safe to call from any event source at any rate.
+	void PumpPhysics();
+
+	// Whether the viewport should treat a left drag as a grab of the running
+	// simulation rather than as whatever the active tool does.
+	bool IsPhysicsGrabEnabled() const;
+
+	// The shapes the simulation moves; empty while it is not running.
+	const std::unordered_set<std::string>& GetPhysicsAffectedShapes() const;
+
+	// Fits the BVHs of those shapes to where the simulation has moved them.
+	// The pump leaves them behind on purpose - rebuilding a tree per frame
+	// costs far more than it is worth for trees only picking uses - so
+	// anything that does pick the simulated mesh has to catch them up first.
+	void RefitPhysicsBVH();
+
+	// Grabbing the mesh with the cursor: drags the physics bones the grabbed
+	// patch is skinned to, leaving what the mesh does on the way to the
+	// constraints, collisions and gravity of its physics XML. Purely a
+	// simulation input - none of it reaches the mesh data or the undo history.
+	bool BeginPhysicsGrab(const std::vector<Physics::GrabTarget>& targets);
+	void UpdatePhysicsGrab(const nifly::Vector3& offset);
+	void EndPhysicsGrab();
+
 	wxGLPanel* glView = nullptr;
 	EditUV* editUV = nullptr;
 	OutfitProject* project = nullptr;
@@ -1004,6 +1093,10 @@ public:
 	wxTreeCtrl* segmentTree = nullptr;
 	wxTreeCtrl* partitionTree = nullptr;
 	wxPanel* lightSettings = nullptr;
+	wxChoice* hdriBackground = nullptr;
+	// Set when the user picks "No background" themselves. A project full of Complex Materials turns
+	// an HDRi on by itself, which would otherwise keep overriding somebody who turned it off.
+	bool hdriBackgroundCleared = false;
 	wxChoice* cXMirrorBone = nullptr;
 	wxChoice* cPoseBone = nullptr;
 	wxSlider* rxPoseSlider = nullptr;
@@ -1021,7 +1114,29 @@ public:
 	wxTextCtrl* tzPoseText = nullptr;
 	wxTextCtrl* scPoseText = nullptr;
 	wxCheckBox* cbPose = nullptr;
+	wxCheckBox* cbPhysics = nullptr;
+	wxCheckBox* cbPhysicsVis = nullptr;
+	wxCheckBox* cbPhysicsGrab = nullptr;
+	wxCheckBox* cbPhysicsProbe = nullptr;
+	wxPanel* physicsProbePanel = nullptr;
+	wxSlider* physicsProbeX = nullptr;
+	wxSlider* physicsProbeY = nullptr;
+	wxSlider* physicsProbeZ = nullptr;
+	wxSlider* physicsProbeSize = nullptr;
+	wxTextCtrl* physicsProbeXText = nullptr;
+	wxTextCtrl* physicsProbeYText = nullptr;
+	wxTextCtrl* physicsProbeZText = nullptr;
+	wxTextCtrl* physicsProbeSizeText = nullptr;
+	wxSlider* physicsWindSlider = nullptr;
+	wxChoice* physicsWindDir = nullptr;
 	wxButton* poseToMesh = nullptr;
+	wxComboBox* cAnimationName = nullptr;
+	wxButton* animFavoriteButton = nullptr;
+	wxButton* animPlayPauseButton = nullptr;
+	wxSlider* animFrameSlider = nullptr;
+	wxStaticText* animFrameText = nullptr;
+	wxChoice* animSpeedChoice = nullptr;
+	wxCheckBox* animInterpolateCheck = nullptr;
 	wxScrolledWindow* sliderScroll = nullptr;
 	wxMenuBar* menuBar = nullptr;
 	wxToolBar* toolBarH = nullptr;
@@ -1044,8 +1159,11 @@ public:
 	wxSlider* fovSlider = nullptr;
 	wxCheckBox* cbDepthClip = nullptr;
 	wxBrushSettingsPopupTransient* brushSettingsPopupTransient = nullptr;
+	wxScrolledWindow* toolScroll = nullptr;
 	wxCollapsiblePane* masksPane = nullptr;
 	wxCollapsiblePane* posePane = nullptr;
+	wxCollapsiblePane* physicsPane = nullptr;
+	wxCollapsiblePane* animationPane = nullptr;
 	wxCollapsiblePane* notesPane = nullptr;
 	wxTextCtrl* projectNotes = nullptr;
 
@@ -1160,7 +1278,7 @@ public:
 	void PopupBrushSettings(wxWindow* popupAt = nullptr);
 	void UpdateBrushSettings();
 	void DeleteSliders(bool keepSliders = false, bool keepZaps = false);
-	int CopyBoneWeightForShapes(std::vector<nifly::NiShape*> shapes, bool silent = false);
+	int CopyBoneWeightForShapes(std::vector<nifly::NiShape*> shapes, bool silent = false, const std::vector<std::string>& preselectedBones = {});
 	int ConformShapes(std::vector<nifly::NiShape*> shapes, bool silent = false);
 	void SetBaseShape();
 	void UpdateTitle();
@@ -1301,6 +1419,7 @@ private:
 
 	bool HasUnweightedCheck();
 	void CalcCopySkinTransOption(WeightCopyOptions& options);
+	void CopyWeightsToSelectedShapes(bool selectedBonesOnly);
 	void ReselectBone();
 
 	int CopySegPartForShapes(std::vector<nifly::NiShape*> shapes, bool silent = false);
@@ -1463,6 +1582,19 @@ private:
 	void OnDepthClip(wxCommandEvent& event);
 	void OnUpdateLights(wxCommandEvent& event);
 	void OnResetLights(wxCommandEvent& event);
+	void OnSaveLights(wxCommandEvent& event);
+	void OnHDRiBackground(wxCommandEvent& event);
+
+	// Fills the background choice from the .exr files in res/hdri, so a file the user dropped in
+	// there is listed next to the ones that ship.
+	void PopulateHDRiBackgrounds();
+	// Applies an HDRi by file name, empty for none. Leaves the choice showing what is actually
+	// loaded, which after a failure is no background rather than what was asked for. remember writes
+	// the name to the config, and belongs only to a background the user picked themselves.
+	bool SetHDRiBackground(const std::string& fileName, bool remember);
+	// Turns the last used background on by itself once a project turns out to have a Complex
+	// Material in it - the shading those want is hard to judge with nothing to reflect.
+	void ApplyAutoHDRiBackground();
 
 	void OnLoadPreset(wxCommandEvent& event);
 	void OnSavePreset(wxCommandEvent& event);
@@ -1538,6 +1670,7 @@ private:
 	void GetBoneDlgData(wxDialog& dlg, nifly::MatTransform& xform, std::string& parentBone, int& addCount);
 	void OnEditBone(wxCommandEvent& event);
 	void OnCopyBoneWeight(wxCommandEvent& event);
+	void OnCopySelectedWeight(wxCommandEvent& event);
 	void OnTransferSelectedWeight(wxCommandEvent& event);
 	void OnMaskWeighted(wxCommandEvent& event);
 	void OnCheckBadBones(wxCommandEvent& event);
@@ -1771,6 +1904,10 @@ private:
 	void OnExportMask(wxCommandEvent& event);
 	void OnImportMask(wxCommandEvent& event);
 	void OnPaneCollapse(wxCollapsiblePaneEvent& event);
+	void OnBottomPanelResize(wxSizeEvent& event);
+	// Re-lays out the bottom panel, capping the scrolled tool area so the
+	// slider list below it keeps its room no matter how many panes are open.
+	void UpdateToolScrollLayout();
 	void ApplyPose();
 
 public:
@@ -1815,6 +1952,129 @@ private:
 	// Updates enabled state of the Save/Delete pose buttons based on
 	// whether the currently selected pose is read-only (e.g. SAM YAML).
 	void UpdatePoseButtonStates();
+
+	// HKX animation playback. Every frame of a loaded animation is stored as a
+	// regular PoseData and applied through the same code path as poses, so a
+	// paused animation behaves exactly like an applied pose.
+	AnimationData* GetSelectedAnimation();
+	double GetAnimPlaybackSpeed();
+	bool IsAnimationInterpolated() const;
+	// Refresh rate of the display the window is on, capped at 120 and falling
+	// back to 60 when the display does not report one.
+	int GetAnimTargetFps();
+	// Microseconds until the next frame should be drawn, 0 when it is due.
+	wxLongLong GetAnimFrameDueInMicro();
+	// Applies the pose at the given frame position, blending the two frames
+	// around a fractional one when interpolation is on.
+	void ApplyAnimationFrame(double framePos, bool updatePoseGUI = true);
+	// Restarts the playback clock at the current frame. Needed whenever the
+	// position or the speed changes while playing, since the frame is derived
+	// from the time elapsed since the clock was last started.
+	void RestartAnimationClock();
+	void StartAnimationPlayback();
+	void PauseAnimationPlayback();
+	// Empties the animation list down to the favorites, which are listed but
+	// only read once selected
+	void ResetAnimationList();
+	// Refills the animation drop-down from the animation entries, keeping the
+	// selection
+	void PopulateAnimationList();
+	void UpdateAnimationPlayerUI();
+	// Enables/disables everything that could edit meshes, bones or the project
+	// while an animation is playing. The player controls stay usable.
+	void SetAnimationPlaybackLock(bool locked);
+	// Resolves the .hkx file next to the configured reference skeleton, showing
+	// an error dialog with the given caption on failure.
+	bool GetReferenceSkeletonHkxPath(std::string& outPath, const wxString& caption);
+	void OnSelectAnimation(wxCommandEvent& event);
+	void OnLoadHkxAnimation(wxCommandEvent& event);
+	void OnAnimationFavorite(wxCommandEvent& event);
+	void OnAnimPlayPause(wxCommandEvent& event);
+	void OnAnimFrameSlider(wxScrollEvent& event);
+	void OnAnimSpeedChanged(wxCommandEvent& event);
+	void OnAnimInterpolateChanged(wxCommandEvent& event);
+	void OnAnimPlaybackTimer(wxTimerEvent& event);
+	// Bound only while an animation plays; this is what drives the frame rate,
+	// the timer being a fallback.
+	void OnAnimIdle(wxIdleEvent& event);
+	// Bound while an animation plays; swallows every menu, toolbar and
+	// accelerator command so nothing can edit the project.
+	void OnBlockedCommandDuringPlayback(wxCommandEvent& event);
+
+	wxTimer animPlaybackTimer;
+	bool animPlaying = false;
+	// Frame position, fractional while interpolating.
+	double animCurrentFrame = 0.0;
+	// Runs while playing; together with animClockBaseFrame it tells which frame
+	// is due, independent of how often ticks actually arrive.
+	wxStopWatch animPlaybackWatch;
+	double animClockBaseFrame = 0.0;
+	// Frame pacing: the animPlaybackWatch reading at which the last frame was
+	// drawn, and the rate being aimed for, resolved once per playback.
+	wxLongLong animLastDrawMicro = 0;
+	int animTargetFps = 60;
+	// Scratch pose for interpolated frames, kept around so that playback does
+	// not reallocate the bone list every tick.
+	PoseData animBlendPose;
+
+	// Physics preview (HDT-SMP): simulation runs while the physics checkbox
+	// is set and either pose mode is active or an animation is playing.
+	// Single authority over building/tearing down the simulation; call after
+	// anything that changes one of those conditions or the loaded meshes.
+	void UpdatePhysicsState();
+	// Hands the shapes as the sliders morph them to the running simulation.
+	void UpdatePhysicsShapes();
+	// Shows the physics controls only while the loaded meshes reference a
+	// physics XML, since there is nothing to simulate otherwise. Stops a running
+	// simulation when the last of them goes away.
+	void UpdatePhysicsControlsVisibility();
+	// Hard teardown for project unload/close: stops the pump and drops all
+	// simulation state without touching the (possibly dying) project meshes.
+	void ShutdownPhysics();
+	void StartPhysicsPump();
+	void StopPhysicsPump();
+	void OnPhysicsCheckBox(wxCommandEvent& event);
+	void OnPhysicsVisCheckBox(wxCommandEvent& event);
+	void OnPhysicsGrabCheckBox(wxCommandEvent& event);
+	// Puts the grab checkbox in the state a (not) running simulation allows
+	void UpdatePhysicsGrabControl(bool enabled);
+	void OnPhysicsProbeCheckBox(wxCommandEvent& event);
+	// Each ball slider writes its value into the field beside it, and each field
+	// puts the handle back where the value is; either way the field is what is read.
+	void OnPhysicsProbeSlider(wxScrollEvent& event, wxTextCtrl* text);
+	void OnPhysicsProbeXSlider(wxScrollEvent& event);
+	void OnPhysicsProbeYSlider(wxScrollEvent& event);
+	void OnPhysicsProbeZSlider(wxScrollEvent& event);
+	void OnPhysicsProbeSizeSlider(wxScrollEvent& event);
+	void OnPhysicsProbeText(wxTextCtrl* text, wxSlider* slider);
+	void OnPhysicsProbeXText(wxCommandEvent& event);
+	void OnPhysicsProbeYText(wxCommandEvent& event);
+	void OnPhysicsProbeZText(wxCommandEvent& event);
+	void OnPhysicsProbeSizeText(wxCommandEvent& event);
+	// The same for the collision ball checkbox
+	void UpdatePhysicsProbeControl(bool enabled);
+	// Shows or hides the ball, its controls and its collider to match the box
+	void UpdatePhysicsProbeState();
+	// Pushes the ball's position and size into the simulation and the viewport
+	void ApplyPhysicsProbe();
+	void OnPhysicsWindSlider(wxScrollEvent& event);
+	void OnPhysicsWindDir(wxCommandEvent& event);
+	// Pushes the wind controls into the simulation; the controller is built
+	// fresh every time physics starts, so it has no idea of either value.
+	void ApplyPhysicsWind();
+	void OnPhysicsTimer(wxTimerEvent& event);
+	void OnPhysicsIdle(wxIdleEvent& event);
+
+	std::unique_ptr<Physics::Controller> physics;
+	// Whether any loaded mesh references a physics XML. The physics pane only
+	// exists on the bones tab, so showing it takes both this and the tab.
+	bool physicsAvailable = false;
+	wxTimer physicsTimer;
+	// Simulation built and active (either pump mode or animation lockstep).
+	bool physicsRunning = false;
+	// Own idle+timer pump bound (pose mode without animation playback).
+	bool physicsPumpActive = false;
+	Physics::PumpClock physicsClock;
 
 	wxDECLARE_EVENT_TABLE();
 };

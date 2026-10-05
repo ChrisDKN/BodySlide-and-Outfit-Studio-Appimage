@@ -17,13 +17,17 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #pragma once
 
+#include "../components/Anim.h"
 #include "../components/BuildSelection.h"
 #include "../components/ClippingFixer.h"
+#include "../components/PoseData.h"
 #include "../components/SliderCategories.h"
 #include "../components/SliderData.h"
 #include "../components/SliderGroup.h"
 #include "../components/SliderManager.h"
 #include "../files/TriFile.h"
+#include "../physics/Controller.h"
+#include "../physics/PumpClock.h"
 #include "../utils/ConfigurationManager.h"
 #include "../utils/Log.h"
 #include "GroupManager.h"
@@ -68,6 +72,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 enum TargetGame { FO3, FONV, SKYRIM, FO4, SKYRIMSE, FO4VR, SKYRIMVR, FO76, OB, SF };
 
+// Marks favorites in the outfit, preset and animation lists and on their buttons
+constexpr const char* FavoriteStar = "\xE2\x98\x85";
+constexpr const char* FavoriteStarIcon = "/res/images/FavoriteStar.png";
+constexpr const char* FavoriteStarEmptyIcon = "/res/images/FavoriteStarEmpty.png";
+
 struct ShapePreviewData {
 	std::string name;
 	std::vector<nifly::Vector3> verts;
@@ -87,8 +96,14 @@ class BodySlideApp : public wxApp {
 
 	/* Command-Line Arguments */
 	std::vector<std::string> cmdGroupBuild;
+	std::vector<std::string> cmdBuildOutfits; // Outfits to build, given by name.
+	std::string cmdBuildFilter;				  // Outfits to build, given as an outfit filter expression.
+	bool cmdBuildFilterRegex = false;		  // The filter is a regular expression instead of a substring.
 	std::string cmdTargetDir;
 	std::string cmdPreset;
+	std::string cmdPresetFile;
+	bool cmdPresetResolved = false;
+	bool cmdPresetPending = false;
 	bool cmdTri = false;
 	std::vector<std::string> cmdPreviewNifs;
 	bool cmdPreviewMode = false;
@@ -147,6 +162,95 @@ private:
 	std::vector<std::unique_ptr<ProjectData>> projects;
 	bool multiProjectMode = false;
 
+	/* Preview skinning, shared by poses, animations and physics */
+	// Skinning of each previewed project's NIF (by project index) and of the
+	// external reference NIF. Held by pointer because the physics bones keep
+	// pointers into them for as long as they exist. Built on demand and dropped
+	// whenever the meshes they describe are replaced.
+	std::vector<std::unique_ptr<AnimInfo>> previewAnims;
+	std::unique_ptr<AnimInfo> previewReferenceAnim;
+	bool previewAnimsBuilt = false;
+	// NIFs previewed as they are, without a project (--preview with NIF files,
+	// or the extra NIFs next to projects). Kept so they can be skinned, with
+	// skinning of their own: they are replaced independently of the projects,
+	// whose skinning the simulation may be holding on to.
+	std::vector<std::unique_ptr<nifly::NifFile>> previewLooseNifs;
+	std::vector<std::unique_ptr<AnimInfo>> previewLooseAnims;
+	bool previewLooseAnimsBuilt = false;
+	// The reference skeleton the application skeleton was loaded from
+	std::string previewSkeletonPath;
+	// Morphed (but not yet skinned) preview vertices per shape, so a physics or
+	// animation tick can re-skin without running every slider again.
+	std::unordered_map<std::string, std::vector<nifly::Vector3>> previewMorphedVerts;
+	std::vector<nifly::Vector3> previewReferenceMorphedVerts;
+	// Paces physics and animation ticks alike
+	Physics::PumpClock previewClock;
+
+	/* Physics preview (HDT-SMP), one simulation per previewed project */
+	struct PreviewPhysicsProject {
+		std::unique_ptr<Physics::Controller> controller;
+		size_t projectIdx = 0;
+	};
+	std::vector<PreviewPhysicsProject> previewPhysics;
+	// At least one previewed project references a physics XML, so the preview
+	// shows its physics controls.
+	bool previewPhysicsAvailable = false;
+	bool previewPhysicsRunning = false;
+
+	/* Pose preview */
+	// Poses from the PoseData folder and the game's SAM/SAF folder, plus the
+	// HKX animations loaded this session. Loaded once, on first use.
+	PoseDataCollection previewPoses;
+	bool previewPosesLoaded = false;
+	// PreviewPoseNone, PreviewPoseRest or PreviewPoseFirst + index into
+	// previewPoses.poseData
+	int previewPoseIndex = 0;
+	// Index into previewPoses.animationData, -1 for none. An animation takes
+	// precedence over the pose.
+	int previewAnimIndex = -1;
+	bool previewAnimPlaying = false;
+	bool previewAnimInterpolate = true;
+	double previewAnimFrame = 0.0;
+	double previewAnimSpeed = 1.0;
+	PoseData previewAnimBlendPose;
+
+	// Loads the reference skeleton of the current game into the application
+	// skeleton if it isn't already.
+	bool EnsurePreviewSkeleton();
+	// Loads the poses and lists the favorite animations if it isn't done yet
+	void EnsurePreviewPosesLoaded();
+	// The game's section in the animation favorites
+	std::string GetAnimationFavoritesGame() const;
+	// Builds the skinning of all previewed NIFs if it isn't already.
+	bool EnsurePreviewSkinning();
+	// Tears down the simulation and drops the skinning, without touching the
+	// displayed meshes. For when the meshes are about to be replaced.
+	void ReleasePreviewSkinning();
+	// A pose or animation is selected, so every skinned shape follows the
+	// skeleton rather than only the simulated ones
+	bool IsPreviewPosed() const;
+	// Whether the previewed meshes have to be skinned at all
+	bool IsPreviewSkinned() const;
+	AnimationData* GetPreviewAnimationData();
+	// Puts the application skeleton into the selected pose or animation frame
+	void ApplyPreviewSkeletonPose();
+	// Moves the skeleton to a different pose or frame in one go and shows it
+	void JumpPreviewSkeleton();
+	// Skins the shape's morphed vertices with the current skeleton pose, or the
+	// simulated bone transforms if a simulation drives the shape.
+	void ApplyPreviewSkinning(size_t projectIdx, const std::string& shapeName, std::vector<nifly::Vector3>& verts);
+	void ApplyPreviewReferenceSkinning(std::vector<nifly::Vector3>& verts);
+	// Shows the loose NIFs posed, or as stored without a pose. Doesn't render.
+	void UpdatePreviewLooseMeshes();
+	// Skins all cached morphed shapes again, or only those a simulation drives
+	void ReskinPreview(bool allShapes);
+	// Puts the plain morphed shapes back once nothing needs skinning anymore
+	void RestoreUnskinnedPreview();
+	// Shows the previewed meshes skinned by whatever currently drives them
+	void RefreshPreviewSkinning();
+	// Ties the preview's tick timer to whether anything is moving
+	void UpdatePreviewPump();
+
 	int CreateSetSliders(const std::string& outfit);
 	std::string GetFavoriteConfigKey(const std::string& listName) const;
 	std::string SerializeFavoriteNames(const std::vector<std::string>& names) const;
@@ -171,6 +275,13 @@ public:
 
 	bool SetDefaultConfig();
 	bool ShowSetup();
+
+	// Pushes the Complex Material render setting to the preview, if one is open.
+	void ApplyComplexMaterialSetting();
+
+	// Pushes the True PBR render setting to the preview, if one is open, rebuilding its meshes when
+	// the setting actually changed - unlike Complex Material this one selects the shader files.
+	void ApplyPBRSetting();
 
 	std::string GetOutputDataPath() const;
 	SliderSet& GetActiveSet() { return projects[0]->sliderSet; }
@@ -207,11 +318,16 @@ public:
 
 	void PopulateFilterData();
 	void ApplyOutfitFilter();
+	// Matches outfit names the same way the outfit filter text box does, either as a
+	// case insensitive substring or, with useRegex, as a case insensitive regular expression.
+	// An invalid regular expression matches nothing and is reported through regexError.
+	std::vector<std::string> FilterOutfitNames(const std::vector<std::string>& names, const std::string& filter, bool useRegex, std::string* regexError = nullptr) const;
 	std::vector<std::string> ApplyPresetFilter(const std::vector<std::string>& presetNames);
 	int GetOutfits(std::vector<std::string>& outList);
 	int GetFilteredOutfits(std::vector<std::string>& outList);
 
 	void LoadPresets(const std::string& sliderSet);
+	void LoadCmdPresetFile();
 	void GetPresetNames(std::vector<std::string>& outNames);
 	std::string GetPresetFileName(const std::string& presetName);
 	void GetPresetGroups(const std::string& presetName, std::vector<std::string>& outGroups);
@@ -288,6 +404,67 @@ public:
 	void UpdateReferenceCheckboxState();
 	void UpdatePreview();
 	void RebuildPreviewMeshes();
+
+	/* Physics preview */
+	// Rescans the previewed meshes for physics XML links and shows or hides the
+	// preview's physics controls accordingly. Always tears the simulation down
+	// first, because whatever led here replaced the meshes it was built on; only
+	// a rebuild of a preview that was simulating ("restart") starts it again,
+	// so a newly opened preview always begins with physics off.
+	void UpdatePreviewPhysicsAvailability(bool restart = false);
+	bool IsPreviewPhysicsAvailable() const { return previewPhysicsAvailable; }
+	// Builds or tears down the simulation for all previewed projects.
+	void EnablePreviewPhysics(bool enable);
+	bool IsPreviewPhysicsRunning() const { return previewPhysicsRunning; }
+	// One animation and simulation tick plus the resulting re-skin and redraw.
+	// Internally paced, so it is safe to call from any event source at any rate.
+	void PumpPreview();
+	// Physics or an animation is moving the preview, so it needs ticks
+	bool IsPreviewPumping() const { return previewPhysicsRunning || previewAnimPlaying; }
+
+	/* Pose preview */
+	static constexpr int PreviewPoseNone = 0;
+	static constexpr int PreviewPoseRest = 1;
+	static constexpr int PreviewPoseFirst = 2;
+	// Names of the loadable poses, in the order PreviewPoseFirst counts from
+	std::vector<std::string> GetPreviewPoseNames();
+	int GetPreviewPose() const { return previewPoseIndex; }
+	void SetPreviewPose(int poseIndex);
+	// Forgets the loaded poses, animations and skeleton, for a change of the
+	// target game or reference skeleton
+	void ResetPreviewPoses();
+	// Takes over the NIFs the preview loaded without a project, replacing the
+	// previous ones, and shows them in the current pose
+	void SetPreviewLooseNifs(std::vector<std::unique_ptr<nifly::NifFile>> nifs);
+
+	// HKX animations exist for Skyrim and Fallout 4 only
+	bool CanLoadPreviewAnimations() const;
+	// Loads an HKX animation and selects it. Returns false with a message in
+	// errorOut on failure.
+	bool LoadPreviewAnimation(const std::string& filePath, std::string& errorOut);
+	// Loaded animations and favorites, in the order of their indices
+	std::vector<std::string> GetPreviewAnimationNames();
+	int GetPreviewAnimation() const { return previewAnimIndex; }
+	// Selects an animation (-1 for none), reading it first if it's a favorite
+	// that wasn't read yet. On failure the selection stays as it was.
+	bool SetPreviewAnimation(int animIndex, std::string* errorOut = nullptr);
+	// Favorites are shared with Outfit Studio
+	bool IsPreviewAnimationFavorite(int animIndex) const;
+	void SetPreviewAnimationFavorite(int animIndex, bool favorite);
+	bool IsPreviewAnimationPlaying() const { return previewAnimPlaying; }
+	void SetPreviewAnimationPlaying(bool playing);
+	size_t GetPreviewAnimationFrameCount();
+	int GetPreviewAnimationFrame() const { return static_cast<int>(previewAnimFrame); }
+	void SeekPreviewAnimation(int frame);
+	void SetPreviewAnimationSpeed(double speed) { previewAnimSpeed = speed; }
+	bool IsPreviewAnimationInterpolated() const { return previewAnimInterpolate; }
+	void SetPreviewAnimationInterpolate(bool interpolate);
+	// Feeds a horizontal camera rotation into the simulation so cloth and hair
+	// react as if the character turned under a fixed camera.
+	void InjectPreviewCameraYaw(float deltaDegrees);
+	// Wind direction as an index into Physics::WindDirectionNames(), strength in
+	// percent.
+	void SetPreviewWind(int directionIndex, int strengthPercent);
 	std::vector<ShapePreviewData> ComputeMorphedShapeData(int weight);
 	void PostProcessPreview(std::vector<ShapePreviewData>& shapeData, int weight);
 	void UpdateExternalReferenceMesh(int weight, std::vector<nifly::Vector3>* outVerts = nullptr);
@@ -302,9 +479,22 @@ public:
 						bool forceNormals = false,
 						const std::string& custPath = "");
 	int ShowBuildOverrideWithPreview(wxDialog* dlg, wxTreeListCtrl* treeListCtrl);
-	void GroupBuild(const std::vector<std::string>& groupNames);
 
-	void AddTriData(nifly::NifFile& nif, const std::string& shapeName, const std::string& triPath, bool toRoot = false);
+	// True if any of the command-line options that select outfits for a build was given.
+	bool HasCmdLineBuild() const { return !cmdGroupBuild.empty() || !cmdBuildOutfits.empty() || !cmdBuildFilter.empty(); }
+	// Resolves the outfits selected by the command line, in the order they were loaded in.
+	// Outfit names that don't exist and filters that match nothing are reported through failedOutfits.
+	std::vector<std::string> GetCmdLineBuildOutfits(std::map<std::string, std::string>& failedOutfits);
+	// Builds the outfits selected by the command line and closes the application.
+	void CommandLineBuild();
+
+	// Removes all BODYTRI extra data from the file and attaches a single fresh one
+	// to the root node (toRoot) or else to the first shape with vertices.
+	void SetTriData(nifly::NifFile& nif, const std::string& triPath, bool toRoot = false);
+
+	// Lists every vertex in a LOCKEDNORM extra data block on each shape with locked normals,
+	// so RaceMenu doesn't recalculate those normals after applying in-game morphs.
+	void SetLockedNormalsData(nifly::NifFile& nif, SliderSet& sliderSet);
 
 	float GetSliderValue(const wxString& sliderName, bool isLo);
 	bool IsUVSlider(const wxString& sliderName);
@@ -318,8 +508,24 @@ public:
 };
 
 static const wxCmdLineEntryDesc g_cmdLineDesc[] = {{wxCMD_LINE_OPTION, "gbuild", "groupbuild", "builds the specified group on launch", wxCMD_LINE_VAL_STRING},
+												   {wxCMD_LINE_OPTION,
+													"b",
+													"build",
+													"builds the specified outfits on launch, a single outfit name or a list of them separated by ',', ';' or '|'",
+													wxCMD_LINE_VAL_STRING},
+												   {wxCMD_LINE_OPTION,
+													"f",
+													"filter",
+													"builds all outfits matching the specified filter on launch, works like the outfit filter box",
+													wxCMD_LINE_VAL_STRING},
+												   {wxCMD_LINE_SWITCH, "regex", "regexfilter", "treats the value of the filter option as a regular expression"},
 												   {wxCMD_LINE_OPTION, "t", "targetdir", "build target directory, defaults to game data path", wxCMD_LINE_VAL_STRING},
-												   {wxCMD_LINE_OPTION, "p", "preset", "preset used for the build, defaults to last used preset", wxCMD_LINE_VAL_STRING},
+												   {wxCMD_LINE_OPTION,
+													"p",
+													"preset",
+													"preset to load on launch, use for the build or apply in preview mode, either a preset name or the "
+													"path to a preset XML file optionally followed by '?' and a preset name, defaults to last used preset",
+													wxCMD_LINE_VAL_STRING},
 												   {wxCMD_LINE_SWITCH, "tri", "trimorphs", "enables tri morph output for the specified build"},
 												   {wxCMD_LINE_OPTION, "preview", "preview", "open the specified nif files in preview mode", wxCMD_LINE_VAL_STRING},
 												   wxCMD_LINE_DESC_END};
@@ -436,12 +642,14 @@ public:
 	wxPanel* leftPanel = nullptr;
 	PreviewPanel* previewPanel = nullptr;
 	bool previewVisible = true;
+	bool previewOnLeft = false;
 	int savedSashPosition = -1;
 	int savedPreviewWidth = 0;
 
 	// Helpers for preview docking/undocking
 	void UnsplitPreview();
 	void SplitPreview(wxPanel* panel = nullptr);
+	void SetPreviewOnLeft(bool onLeft);
 	void UpdatePreviewButtonLabel();
 
 	BodySlideFrame(BodySlideApp* app, const wxSize& size);

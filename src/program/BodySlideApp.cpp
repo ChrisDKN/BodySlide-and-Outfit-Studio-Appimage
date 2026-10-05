@@ -18,6 +18,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "BodySlideApp.h"
 #include "../components/ClippingFixer.h"
 #include "../components/Mesh.h"
+#include "../files/GameDataStream.h"
 #include "../files/SFMorphFile.h"
 #include "../files/wxDDSImage.h"
 #include "../utils/SettingsDialogShared.h"
@@ -36,6 +37,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <atomic>
 #include <mutex>
 #include <regex>
+#include <set>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -49,11 +51,8 @@ ConfigurationManager Config;
 ConfigurationManager BodySlideConfig;
 
 namespace {
-constexpr const char* FavoriteStar = "\xE2\x98\x85";
 constexpr char FavoriteSeparator = ';';
 constexpr char FavoriteEscape = '\\';
-constexpr const char* FavoriteStarIcon = "/res/images/FavoriteStar.png";
-constexpr const char* FavoriteStarEmptyIcon = "/res/images/FavoriteStarEmpty.png";
 constexpr int MinBodySlideLeftPaneWidthDip = 850;
 }
 
@@ -210,6 +209,10 @@ bool BodySlideApp::OnInit() {
 	// Handle preview mode - open nif files directly without main frame
 	if (cmdPreviewMode && !cmdPreviewNifs.empty()) {
 		wxLogMessage("BodySlide preview mode initialized.");
+
+		// Resolve the preset of a preset file given on the command line before the projects are loaded.
+		LoadCmdPresetFile();
+
 		ShowPreview();
 		if (preview) {
 			preview->SetReadOnlyMode(true);
@@ -275,14 +278,12 @@ bool BodySlideApp::OnInit() {
 	LoadAllGroups();
 	LoadSliderSets();
 
-	if (cmdGroupBuild.empty()) {
+	wxLogMessage("BodySlide initialized.");
+
+	if (HasCmdLineBuild())
+		CommandLineBuild();
+	else
 		sliderView->delayLoad.Start(100, true);
-		wxLogMessage("BodySlide initialized.");
-	}
-	else {
-		wxLogMessage("BodySlide initialized.");
-		GroupBuild(cmdGroupBuild);
-	}
 
 	return true;
 }
@@ -304,6 +305,27 @@ bool BodySlideApp::OnCmdLineParsed(wxCmdLineParser& parser) {
 		}
 	}
 
+	wxString buildOutfits;
+	parser.Found("b", &buildOutfits);
+
+	// Outfit names can contain commas, so semicolons and pipes are accepted as separators as well.
+	wxStringTokenizer outfitTokenizer(buildOutfits, ",;|");
+	while (outfitTokenizer.HasMoreTokens()) {
+		wxString token = outfitTokenizer.GetNextToken().Trim(true).Trim(false);
+		if (!token.IsEmpty()) {
+			std::string outfitName = token.ToUTF8().data();
+			cmdBuildOutfits.push_back(outfitName);
+		}
+	}
+
+	wxString buildFilter;
+	if (parser.Found("f", &buildFilter)) {
+		buildFilter.Trim(true).Trim(false);
+		cmdBuildFilter = buildFilter.ToUTF8().data();
+	}
+
+	cmdBuildFilterRegex = parser.Found("regex");
+
 	wxString targetDir;
 	parser.Found("t", &targetDir);
 
@@ -313,8 +335,31 @@ bool BodySlideApp::OnCmdLineParsed(wxCmdLineParser& parser) {
 	cmdTargetDir = targetDir.ToUTF8().data();
 
 	wxString preset;
-	parser.Found("p", &preset);
-	cmdPreset = preset.ToUTF8().data();
+	if (parser.Found("p", &preset)) {
+		preset.Trim(true).Trim(false);
+
+		// The preset can either be given by name or as the path to a preset XML file.
+		// A preset file can be followed by '?' and the name of one of its presets, same as for the preview option.
+		wxString presetPath = preset;
+		wxString presetName;
+
+		int nameSep = preset.Find('?');
+		if (nameSep != wxNOT_FOUND) {
+			presetPath = preset.Left(nameSep).Trim(true).Trim(false);
+			presetName = preset.Mid(nameSep + 1).Trim(true).Trim(false);
+		}
+
+		if (presetPath.Lower().EndsWith(".xml")) {
+			wxFileName presetFileName(presetPath);
+			presetFileName.MakeAbsolute();
+			cmdPresetFile = presetFileName.GetFullPath().ToUTF8().data();
+			cmdPreset = presetName.ToUTF8().data();
+		}
+		else
+			cmdPreset = preset.ToUTF8().data();
+
+		cmdPresetPending = !cmdPreset.empty() || !cmdPresetFile.empty();
+	}
 
 	cmdTri = parser.Found("tri");
 
@@ -440,6 +485,23 @@ void BodySlideApp::LoadData() {
 		LoadPresets(activeOutfit);
 
 		std::string activePreset = BodySlideConfig["SelectedPreset"];
+
+		if (cmdPresetPending) {
+			// A preset was specified on the command line, apply it instead of the last used one.
+			cmdPresetPending = false;
+
+			if (GetPresetFileName(cmdPreset).empty())
+				wxLogWarning("Preset '%s' from the command line is not available for set '%s', keeping preset '%s'.", cmdPreset, activeOutfit, activePreset);
+			else {
+				wxLogMessage("Applying preset '%s' from the command line.", cmdPreset);
+				activePreset = cmdPreset;
+
+				// Make sure a filter of the last session doesn't hide the preset in the list.
+				if (sliderView->presetFilter)
+					sliderView->presetFilter->ChangeValue("");
+			}
+		}
+
 		PopulatePresetList(activePreset);
 		ActivatePreset(activePreset);
 
@@ -1988,6 +2050,9 @@ void BodySlideApp::InitPreview() {
 				return;
 			}
 
+			// The skinning and simulation describe the NIFs about to be replaced
+			ReleasePreviewSkinning();
+
 			bool anyGenWeights = false;
 			std::string baseGamePath = Config["GameDataPath"];
 			preview->SetBaseDataPath(baseGamePath);
@@ -2074,6 +2139,7 @@ void BodySlideApp::InitPreview() {
 
 			previewLoading = false;
 			UpdatePreview();
+			UpdatePreviewPhysicsAvailability();
 			preview->ShowLoadingIndicator(false);
 		});
 	});
@@ -2161,7 +2227,7 @@ void BodySlideApp::LoadPreviewNifs(const std::vector<std::string>& filePaths) {
 			wxLogMessage("Loading %zu combined project(s) in preview mode...", projEntries.size());
 			if (!nifPaths.empty())
 				preview->SetExtraNifPaths(nifPaths);
-			preview->SetProjectData(projEntries, true);
+			preview->SetProjectData(projEntries, true, cmdPreset);
 			return;
 		}
 	}
@@ -2193,13 +2259,16 @@ void BodySlideApp::LoadPreviewNifs(const std::vector<std::string>& filePaths) {
 			wxLogMessage("Loading %zu slider set(s) from %zu OSP file(s)", projEntries.size(), entries.size());
 			if (!nifPaths.empty())
 				preview->SetExtraNifPaths(nifPaths);
-			preview->SetProjectData(projEntries);
+			preview->SetProjectData(projEntries, false, cmdPreset);
 			return;
 		}
 
 		if (anyOsp)
 			return;
 	}
+
+	if (!cmdPreset.empty())
+		wxLogWarning("Preset '%s' from the command line is ignored, presets only apply to project files.", cmdPreset);
 
 	// Load as regular NIF files
 	std::vector<std::string> paths;
@@ -2412,6 +2481,14 @@ std::vector<ShapePreviewData> BodySlideApp::ComputeMorphedShapeData(int weight) 
 }
 
 void BodySlideApp::PostProcessPreview(std::vector<ShapePreviewData>& shapeData, int weight) {
+	// A pose or the simulation moves the vertices by their bones, after
+	// everything else was done to them
+	const bool skinned = IsPreviewSkinned() && EnsurePreviewSkinning();
+	if (!skinned) {
+		previewMorphedVerts.clear();
+		previewReferenceMorphedVerts.clear();
+	}
+
 	// Apply clipping fix and handle external reference
 	bool useExternalReference = !multiProjectMode && referenceNif && preview &&
 							  (clippingFixStrength > 0.0f || preview->IsShowReferenceChecked());
@@ -2423,6 +2500,7 @@ void BodySlideApp::PostProcessPreview(std::vector<ShapePreviewData>& shapeData, 
 	// Hide external reference mesh when not in use
 	if (!useExternalReference && referenceNif && preview) {
 		preview->SetMeshVisibility(referenceShapeName, false);
+		previewReferenceMorphedVerts.clear();
 	}
 
 	if (clippingFixStrength > 0.0f) {
@@ -2486,10 +2564,670 @@ void BodySlideApp::PostProcessPreview(std::vector<ShapePreviewData>& shapeData, 
 				sd.uvs.erase(sd.uvs.begin() + sd.zapIdx[z]);
 			}
 		}
+
+		if (skinned) {
+			// Remember the morphed shape so a physics or animation tick can skin
+			// it again without running all sliders, then show it skinned
+			previewMorphedVerts[sd.name] = sd.verts;
+
+			// Collide with the shape the sliders describe, not the base shape
+			for (auto& physics : previewPhysics)
+				if (physics.projectIdx == sd.projectIdx)
+					physics.controller->SetShapeVertices(sd.name, sd.verts);
+
+			ApplyPreviewSkinning(sd.projectIdx, sd.name, sd.verts);
+		}
+
 		preview->UpdateMeshes(sd.name, &sd.verts, &sd.uvs);
 	}
 
 	preview->Render();
+}
+
+void BodySlideApp::UpdatePreviewPhysicsAvailability(bool restart) {
+	// Whatever led here replaced the previewed meshes, so the simulation - which
+	// holds shapes of those meshes - has to go either way.
+	EnablePreviewPhysics(false);
+
+	previewPhysicsAvailable = false;
+	for (auto& pp : projects) {
+		if (Physics::HasPhysicsLinks(&pp->modNif, {})) {
+			previewPhysicsAvailable = true;
+			break;
+		}
+	}
+
+	if (restart && previewPhysicsAvailable)
+		EnablePreviewPhysics(true);
+
+	if (preview) {
+		preview->ShowPhysicsControls(previewPhysicsAvailable);
+		preview->SetPhysicsChecked(previewPhysicsRunning);
+	}
+}
+
+void BodySlideApp::EnablePreviewPhysics(bool enable) {
+	if (enable == previewPhysicsRunning)
+		return;
+
+	if (!enable) {
+		previewPhysicsRunning = false;
+		previewPhysics.clear();
+		UpdatePreviewPump();
+
+		// Back to the plain morphed shape the sliders describe, or to the pose
+		// without the simulated bones
+		RefreshPreviewSkinning();
+		return;
+	}
+
+	if (!IsPreviewRenderable() || projects.empty())
+		return;
+
+	// The simulation reads its kinematic input from the application skeleton
+	if (!EnsurePreviewSkinning())
+		return;
+
+	for (size_t i = 0; i < projects.size() && i < previewAnims.size(); i++) {
+		auto& pp = projects[i];
+
+		// The mod's own folder is the fallback for physics XMLs that aren't
+		// installed under the game data path
+		const std::string& nifPath = pp->inputFileName;
+
+		std::vector<std::string> warnings;
+		auto controller = std::make_unique<Physics::Controller>();
+		size_t systemCount = controller->BuildFromNif(
+			&pp->modNif,
+			previewAnims[i].get(),
+			[&nifPath](const std::string& xmlPath) { return GameDataStream::OpenPhysicsXml(xmlPath, nifPath); },
+			{},
+			warnings);
+
+		for (auto& warning : warnings)
+			wxLogWarning("Physics: %s", warning);
+
+		if (systemCount == 0)
+			continue;
+
+		// The systems are built from the base shapes of the NIF
+		for (auto it = pp->sliderSet.ShapesBegin(); it != pp->sliderSet.ShapesEnd(); ++it) {
+			auto morphedVerts = previewMorphedVerts.find(it->first);
+			if (morphedVerts != previewMorphedVerts.end())
+				controller->SetShapeVertices(it->first, morphedVerts->second);
+		}
+
+		controller->ResetDynamics();
+
+		PreviewPhysicsProject entry;
+		entry.controller = std::move(controller);
+		entry.projectIdx = i;
+		previewPhysics.push_back(std::move(entry));
+	}
+
+	if (previewPhysics.empty()) {
+		wxLogWarning("No physics XMLs could be loaded for the previewed meshes.");
+		return;
+	}
+
+	previewPhysicsRunning = true;
+	previewClock.Reset();
+	UpdatePreviewPump();
+
+	// Fills the morphed vertex cache and shows the first simulated frame
+	UpdatePreview();
+}
+
+bool BodySlideApp::EnsurePreviewSkeleton() {
+	if (previewSkeletonPath == Config["Anim/DefaultSkeletonReference"] && AnimSkeleton::getInstance().GetActiveBoneCount() > 0)
+		return true;
+
+	// BodySlide has no use for the skeleton outside of the preview, so it's
+	// only loaded once something there needs it
+	if (LoadDefaultSkeletonReference() != 0) {
+		wxLogError("The preview needs the reference skeleton, which could not be loaded.");
+		return false;
+	}
+
+	previewSkeletonPath = Config["Anim/DefaultSkeletonReference"];
+	return true;
+}
+
+bool BodySlideApp::EnsurePreviewSkinning() {
+	if (previewAnimsBuilt && previewLooseAnimsBuilt)
+		return true;
+
+	if (!EnsurePreviewSkeleton())
+		return false;
+
+	if (!previewAnimsBuilt) {
+		previewAnims.clear();
+		for (auto& pp : projects) {
+			auto anim = std::make_unique<AnimInfo>();
+			anim->LoadFromNif(&pp->modNif);
+			previewAnims.push_back(std::move(anim));
+		}
+
+		previewReferenceAnim.reset();
+		if (referenceNif) {
+			previewReferenceAnim = std::make_unique<AnimInfo>();
+			previewReferenceAnim->LoadFromNif(referenceNif.get());
+		}
+
+		previewAnimsBuilt = true;
+	}
+
+	if (!previewLooseAnimsBuilt) {
+		previewLooseAnims.clear();
+		for (auto& nif : previewLooseNifs) {
+			auto anim = std::make_unique<AnimInfo>();
+			anim->LoadFromNif(nif.get());
+			previewLooseAnims.push_back(std::move(anim));
+		}
+
+		previewLooseAnimsBuilt = true;
+	}
+
+	// Loading the skinning may have added custom bones to the skeleton
+	ApplyPreviewSkeletonPose();
+	return true;
+}
+
+void BodySlideApp::SetPreviewLooseNifs(std::vector<std::unique_ptr<NifFile>> nifs) {
+	previewLooseAnims.clear();
+	previewLooseAnimsBuilt = false;
+	previewLooseNifs = std::move(nifs);
+
+	if (IsPreviewPosed() && EnsurePreviewSkinning())
+		UpdatePreviewLooseMeshes();
+}
+
+void BodySlideApp::UpdatePreviewLooseMeshes() {
+	if (!preview)
+		return;
+
+	const bool posed = IsPreviewPosed() && previewLooseAnimsBuilt;
+
+	std::vector<Vector3> verts;
+	for (size_t i = 0; i < previewLooseNifs.size(); i++) {
+		auto& nif = previewLooseNifs[i];
+		for (auto shape : nif->GetShapes()) {
+			if (!shape->IsSkinned() || !nif->GetVertsForShape(shape, verts))
+				continue;
+
+			if (posed && i < previewLooseAnims.size())
+				ApplySkinningToVerts(*previewLooseAnims[i], shape, nif->GetHeader().GetVersion().IsSF(), nullptr, verts);
+
+			preview->UpdateMeshes(shape->name.get(), &verts);
+		}
+	}
+}
+
+void BodySlideApp::ReleasePreviewSkinning() {
+	const bool physicsWasRunning = previewPhysicsRunning;
+
+	// The simulation holds pointers into the skinning, so it goes first
+	previewPhysicsRunning = false;
+	previewPhysics.clear();
+
+	previewAnims.clear();
+	previewReferenceAnim.reset();
+	previewAnimsBuilt = false;
+
+	// Nothing holds on to these, but they go along in case the skeleton changes
+	previewLooseAnims.clear();
+	previewLooseAnimsBuilt = false;
+
+	previewMorphedVerts.clear();
+	previewReferenceMorphedVerts.clear();
+
+	if (physicsWasRunning && preview)
+		preview->SetPhysicsChecked(false);
+
+	UpdatePreviewPump();
+}
+
+bool BodySlideApp::IsPreviewPosed() const {
+	return previewAnimIndex >= 0 || previewPoseIndex != PreviewPoseNone;
+}
+
+bool BodySlideApp::IsPreviewSkinned() const {
+	return previewPhysicsRunning || IsPreviewPosed();
+}
+
+AnimationData* BodySlideApp::GetPreviewAnimationData() {
+	if (previewAnimIndex < 0 || static_cast<size_t>(previewAnimIndex) >= previewPoses.animationData.size())
+		return nullptr;
+
+	return &previewPoses.animationData[previewAnimIndex];
+}
+
+void BodySlideApp::ApplyPreviewSkeletonPose() {
+	AnimationData* anim = GetPreviewAnimationData();
+	if (anim && !anim->framePoses.empty()) {
+		const size_t numFrames = anim->framePoses.size();
+		const size_t frame = std::min(static_cast<size_t>(previewAnimFrame), numFrames - 1);
+		const float blend = static_cast<float>(previewAnimFrame - static_cast<double>(frame));
+
+		if (previewAnimInterpolate && numFrames > 1 && blend > 0.0f) {
+			// Playback loops, so the last frame blends back into the first one
+			const size_t nextFrame = (frame + 1) % numFrames;
+			PoseData::Interpolate(anim->framePoses[frame], anim->framePoses[nextFrame], blend, previewAnimBlendPose);
+			previewAnimBlendPose.ApplyToSkeleton();
+		}
+		else {
+			anim->framePoses[frame].ApplyToSkeleton();
+		}
+		return;
+	}
+
+	const int poseDataIndex = previewPoseIndex - PreviewPoseFirst;
+	if (poseDataIndex >= 0 && static_cast<size_t>(poseDataIndex) < previewPoses.poseData.size()) {
+		previewPoses.poseData[poseDataIndex].ApplyToSkeleton();
+		return;
+	}
+
+	// An empty pose puts every bone back where the skeleton has it
+	PoseData().ApplyToSkeleton();
+}
+
+void BodySlideApp::ApplyPreviewSkinning(size_t projectIdx, const std::string& shapeName, std::vector<Vector3>& verts) {
+	if (projectIdx >= projects.size() || projectIdx >= previewAnims.size())
+		return;
+
+	auto& modNif = projects[projectIdx]->modNif;
+	auto shape = modNif.FindBlockByName<NiShape>(shapeName);
+	if (!shape || !shape->IsSkinned())
+		return;
+
+	// The skinning indexes the vertices of the NIF it was loaded from
+	if (verts.size() != shape->GetNumVertices())
+		return;
+
+	const AnimPoseOverrideMap* poseOverrides = nullptr;
+	for (auto& physics : previewPhysics) {
+		if (physics.projectIdx == projectIdx && physics.controller->AffectedShapes().count(shapeName) != 0) {
+			poseOverrides = &physics.controller->PoseOverrides();
+			break;
+		}
+	}
+
+	// Without a pose only the simulated shapes move, everything else stays as
+	// the sliders shape it
+	if (!poseOverrides && !IsPreviewPosed())
+		return;
+
+	ApplySkinningToVerts(*previewAnims[projectIdx], shape, modNif.GetHeader().GetVersion().IsSF(), poseOverrides, verts);
+}
+
+void BodySlideApp::ApplyPreviewReferenceSkinning(std::vector<Vector3>& verts) {
+	if (!referenceNif || !previewReferenceAnim || !IsPreviewPosed())
+		return;
+
+	auto shape = referenceNif->FindBlockByName<NiShape>(referenceShapeName);
+	if (!shape || !shape->IsSkinned() || verts.size() != shape->GetNumVertices())
+		return;
+
+	ApplySkinningToVerts(*previewReferenceAnim, shape, referenceNif->GetHeader().GetVersion().IsSF(), nullptr, verts);
+}
+
+void BodySlideApp::ReskinPreview(bool allShapes) {
+	if (!IsPreviewRenderable() || !previewAnimsBuilt)
+		return;
+
+	std::vector<Vector3> verts;
+	if (allShapes) {
+		for (size_t pi = 0; pi < projects.size(); pi++) {
+			auto& pp = projects[pi];
+			for (auto it = pp->sliderSet.ShapesBegin(); it != pp->sliderSet.ShapesEnd(); ++it) {
+				auto morphedVerts = previewMorphedVerts.find(it->first);
+				if (morphedVerts == previewMorphedVerts.end())
+					continue;
+
+				verts = morphedVerts->second;
+				ApplyPreviewSkinning(pi, it->first, verts);
+				preview->UpdateMeshes(it->first, &verts);
+			}
+		}
+
+		if (!previewReferenceMorphedVerts.empty()) {
+			verts = previewReferenceMorphedVerts;
+			ApplyPreviewReferenceSkinning(verts);
+			preview->UpdateMeshes(referenceShapeName, &verts);
+		}
+
+		UpdatePreviewLooseMeshes();
+	}
+	else {
+		// Only the shapes the simulation actually drives have to be skinned again
+		for (auto& physics : previewPhysics) {
+			for (auto& shapeName : physics.controller->AffectedShapes()) {
+				auto morphedVerts = previewMorphedVerts.find(shapeName);
+				if (morphedVerts == previewMorphedVerts.end())
+					continue;
+
+				verts = morphedVerts->second;
+				ApplyPreviewSkinning(physics.projectIdx, shapeName, verts);
+				preview->UpdateMeshes(shapeName, &verts);
+			}
+		}
+	}
+
+	preview->Render();
+}
+
+void BodySlideApp::RestoreUnskinnedPreview() {
+	if (IsPreviewRenderable()) {
+		for (auto& morphedVerts : previewMorphedVerts)
+			preview->UpdateMeshes(morphedVerts.first, &morphedVerts.second);
+
+		if (!previewReferenceMorphedVerts.empty())
+			preview->UpdateMeshes(referenceShapeName, &previewReferenceMorphedVerts);
+
+		UpdatePreviewLooseMeshes();
+		preview->Render();
+	}
+
+	previewMorphedVerts.clear();
+	previewReferenceMorphedVerts.clear();
+}
+
+void BodySlideApp::RefreshPreviewSkinning() {
+	if (!IsPreviewSkinned()) {
+		RestoreUnskinnedPreview();
+		return;
+	}
+
+	// A preview of loose NIFs has no project, so no sliders to run either
+	if (projects.empty()) {
+		if (IsPreviewRenderable() && EnsurePreviewSkinning()) {
+			UpdatePreviewLooseMeshes();
+			preview->Render();
+		}
+		return;
+	}
+
+	// Nothing was skinned so far, so the sliders have to run once to fill the
+	// morphed vertex cache
+	if (!previewAnimsBuilt || previewMorphedVerts.empty()) {
+		UpdatePreview();
+		return;
+	}
+
+	ReskinPreview(true);
+}
+
+void BodySlideApp::UpdatePreviewPump() {
+	if (preview)
+		preview->SetPumpActive(IsPreviewPumping());
+}
+
+void BodySlideApp::PumpPreview() {
+	if (!IsPreviewPumping())
+		return;
+
+	if (!IsPreviewRenderable()) {
+		previewAnimPlaying = false;
+		EnablePreviewPhysics(false);
+		UpdatePreviewPump();
+		return;
+	}
+
+	float dtSeconds = 0.0f;
+	if (!previewClock.StepDue(dtSeconds))
+		return;
+
+	bool skeletonMoved = false;
+	if (previewAnimPlaying) {
+		AnimationData* anim = GetPreviewAnimationData();
+		if (anim && !anim->framePoses.empty()) {
+			const double numFrames = static_cast<double>(anim->framePoses.size());
+			const double frameDuration = anim->frameDuration > 0.0f ? anim->frameDuration : 1.0 / 30.0;
+			const double prevFrame = previewAnimFrame;
+
+			previewAnimFrame = std::fmod(previewAnimFrame + dtSeconds * previewAnimSpeed / frameDuration, numFrames);
+			if (!(previewAnimFrame >= 0.0))
+				previewAnimFrame = 0.0;
+
+			// Without interpolation only whole frames are ever shown, so nothing
+			// changes until the position has crossed into the next one
+			if (previewAnimInterpolate || static_cast<size_t>(previewAnimFrame) != static_cast<size_t>(prevFrame)) {
+				ApplyPreviewSkeletonPose();
+				skeletonMoved = true;
+				preview->SyncAnimationControls();
+			}
+		}
+	}
+
+	for (auto& physics : previewPhysics)
+		physics.controller->Step(dtSeconds);
+
+	if (skeletonMoved || !previewPhysics.empty())
+		ReskinPreview(skeletonMoved);
+}
+
+void BodySlideApp::EnsurePreviewPosesLoaded() {
+	if (previewPosesLoaded)
+		return;
+
+	previewPosesLoaded = true;
+	previewPoses.LoadData(ProjectUtil::GetProjectSubPath("PoseData"));
+
+	switch (targetGame) {
+		case SKYRIMSE:
+		case SKYRIMVR:
+		case FO4:
+		case FO4VR:
+			previewPoses.LoadGamePoses(GameUtil::GetGameDataPath(targetGame).ToUTF8().data(), targetGame == FO4 || targetGame == FO4VR);
+			break;
+		default: break;
+	}
+
+	// Listed right away, but only read once selected
+	if (CanLoadPreviewAnimations())
+		previewPoses.LoadFavoriteAnimations(GetAnimationFavoritesGame());
+}
+
+std::string BodySlideApp::GetAnimationFavoritesGame() const {
+	return GameUtil::TargetGames[targetGame].ToStdString();
+}
+
+std::vector<std::string> BodySlideApp::GetPreviewPoseNames() {
+	EnsurePreviewPosesLoaded();
+
+	std::vector<std::string> names;
+	names.reserve(previewPoses.poseData.size());
+	for (auto& pose : previewPoses.poseData)
+		names.push_back(pose.name);
+
+	return names;
+}
+
+void BodySlideApp::SetPreviewPose(int poseIndex) {
+	if (poseIndex < PreviewPoseNone || poseIndex >= PreviewPoseFirst + static_cast<int>(previewPoses.poseData.size()))
+		poseIndex = PreviewPoseNone;
+
+	if (poseIndex == previewPoseIndex)
+		return;
+
+	previewPoseIndex = poseIndex;
+
+	// An animation decides the pose for as long as it's selected
+	if (previewAnimIndex >= 0)
+		return;
+
+	JumpPreviewSkeleton();
+}
+
+void BodySlideApp::JumpPreviewSkeleton() {
+	ApplyPreviewSkeletonPose();
+
+	// The bones teleport, so re-seat the simulated bodies on them instead of
+	// letting them read the jump as a huge velocity
+	for (auto& physics : previewPhysics)
+		physics.controller->ResetDynamics();
+
+	RefreshPreviewSkinning();
+}
+
+void BodySlideApp::ResetPreviewPoses() {
+	previewAnimPlaying = false;
+	ReleasePreviewSkinning();
+
+	previewPoses = PoseDataCollection();
+	previewPosesLoaded = false;
+	previewPoseIndex = PreviewPoseNone;
+	previewAnimIndex = -1;
+	previewAnimFrame = 0.0;
+
+	// The next game may use a different skeleton
+	previewSkeletonPath.clear();
+
+	if (preview)
+		preview->RefreshPoseControls();
+
+	UpdatePreview();
+}
+
+bool BodySlideApp::CanLoadPreviewAnimations() const {
+	switch (targetGame) {
+		case SKYRIM:
+		case SKYRIMSE:
+		case SKYRIMVR:
+		case FO4:
+		case FO4VR: return true;
+		default: return false;
+	}
+}
+
+bool BodySlideApp::LoadPreviewAnimation(const std::string& filePath, std::string& errorOut) {
+	EnsurePreviewPosesLoaded();
+
+	// A file that's listed already, as a favorite or loaded before, is selected
+	// instead of being added again
+	const size_t prevCount = previewPoses.animationData.size();
+	const AnimationData* anim = previewPoses.AddAnimationFile(filePath);
+
+	for (size_t i = 0; i < previewPoses.animationData.size(); i++) {
+		if (&previewPoses.animationData[i] != anim)
+			continue;
+
+		if (SetPreviewAnimation(static_cast<int>(i), &errorOut))
+			return true;
+
+		// A file that can't be read isn't worth listing. New entries go last,
+		// so dropping it doesn't move the selected one.
+		if (previewPoses.animationData.size() > prevCount)
+			previewPoses.animationData.pop_back();
+
+		return false;
+	}
+
+	return false;
+}
+
+std::vector<std::string> BodySlideApp::GetPreviewAnimationNames() {
+	EnsurePreviewPosesLoaded();
+
+	std::vector<std::string> names;
+	names.reserve(previewPoses.animationData.size());
+	for (auto& anim : previewPoses.animationData)
+		names.push_back(anim.name);
+
+	return names;
+}
+
+bool BodySlideApp::IsPreviewAnimationFavorite(int animIndex) const {
+	if (animIndex < 0 || static_cast<size_t>(animIndex) >= previewPoses.animationData.size())
+		return false;
+
+	return previewPoses.IsFavoriteAnimation(previewPoses.animationData[animIndex]);
+}
+
+void BodySlideApp::SetPreviewAnimationFavorite(int animIndex, bool favorite) {
+	if (animIndex < 0 || static_cast<size_t>(animIndex) >= previewPoses.animationData.size())
+		return;
+
+	previewPoses.SetFavoriteAnimation(previewPoses.animationData[animIndex], GetAnimationFavoritesGame(), favorite);
+}
+
+bool BodySlideApp::SetPreviewAnimation(int animIndex, std::string* errorOut) {
+	if (animIndex < 0 || static_cast<size_t>(animIndex) >= previewPoses.animationData.size())
+		animIndex = -1;
+
+	// Favorites are only read once they're picked
+	if (animIndex >= 0) {
+		wxString error;
+		if (!PoseDataCollection::LoadAnimationFrames(previewPoses.animationData[animIndex], error)) {
+			if (errorOut)
+				*errorOut = error.ToUTF8().data();
+			return false;
+		}
+	}
+
+	previewAnimIndex = animIndex;
+	previewAnimFrame = 0.0;
+
+	if (animIndex < 0)
+		previewAnimPlaying = false;
+
+	JumpPreviewSkeleton();
+	UpdatePreviewPump();
+	return true;
+}
+
+void BodySlideApp::SetPreviewAnimationPlaying(bool playing) {
+	AnimationData* anim = GetPreviewAnimationData();
+	if (!anim || anim->framePoses.empty())
+		playing = false;
+
+	if (playing == previewAnimPlaying)
+		return;
+
+	previewAnimPlaying = playing;
+
+	if (playing) {
+		previewClock.Reset();
+	}
+	else {
+		// Land on a whole frame, so the pose left behind is the one the frame
+		// slider reports rather than a blend between two of them
+		previewAnimFrame = std::floor(previewAnimFrame);
+		ApplyPreviewSkeletonPose();
+		RefreshPreviewSkinning();
+	}
+
+	UpdatePreviewPump();
+}
+
+size_t BodySlideApp::GetPreviewAnimationFrameCount() {
+	AnimationData* anim = GetPreviewAnimationData();
+	return anim ? anim->GetNumFrames() : 0;
+}
+
+void BodySlideApp::SeekPreviewAnimation(int frame) {
+	const size_t numFrames = GetPreviewAnimationFrameCount();
+	if (numFrames == 0)
+		return;
+
+	previewAnimFrame = static_cast<double>(std::clamp(frame, 0, static_cast<int>(numFrames) - 1));
+	JumpPreviewSkeleton();
+}
+
+void BodySlideApp::SetPreviewAnimationInterpolate(bool interpolate) {
+	previewAnimInterpolate = interpolate;
+}
+
+void BodySlideApp::InjectPreviewCameraYaw(float deltaDegrees) {
+	for (auto& physics : previewPhysics)
+		physics.controller->InjectCameraYaw(deltaDegrees);
+}
+
+void BodySlideApp::SetPreviewWind(int directionIndex, int strengthPercent) {
+	for (auto& physics : previewPhysics) {
+		physics.controller->SetWindDirection(Physics::WindDirectionFromIndex(directionIndex));
+		physics.controller->SetWindStrength(strengthPercent / 100.0f);
+	}
 }
 
 void BodySlideApp::CleanupPreview() {
@@ -2497,6 +3235,13 @@ void BodySlideApp::CleanupPreview() {
 		return;
 
 	PerformanceTimer timing("BodySlide preview cleanup");
+
+	// The pose and animation stay selected for the next preview, but nothing
+	// keeps moving without one
+	previewAnimPlaying = false;
+	ReleasePreviewSkinning();
+	previewPhysicsAvailable = false;
+
 	// Cancel async load and wait for it to finish
 	++previewLoadGeneration;
 	if (previewLoadThread.joinable())
@@ -2507,6 +3252,7 @@ void BodySlideApp::CleanupPreview() {
 	preview->Cleanup();
 	preview->ShowLoadingIndicator(false);
 	referenceNif.reset();
+	previewLooseNifs.clear();
 
 	if (multiProjectMode) {
 		projects.clear();
@@ -2529,6 +3275,10 @@ void BodySlideApp::RebuildPreviewMeshes() {
 
 	int weight = preview->GetWeight();
 	auto shapeData = ComputeMorphedShapeData(weight);
+
+	// The skinning and simulation describe the NIFs about to be rewritten
+	const bool physicsWasRunning = previewPhysicsRunning;
+	ReleasePreviewSkinning();
 
 	// Multi-project mode
 	if (multiProjectMode) {
@@ -2586,6 +3336,7 @@ void BodySlideApp::RebuildPreviewMeshes() {
 		}
 
 		PostProcessPreview(shapeData, weight);
+		UpdatePreviewPhysicsAvailability(physicsWasRunning);
 		return;
 	}
 
@@ -2626,6 +3377,7 @@ void BodySlideApp::RebuildPreviewMeshes() {
 	}
 
 	PostProcessPreview(shapeData, weight);
+	UpdatePreviewPhysicsAvailability(physicsWasRunning);
 }
 
 void BodySlideApp::UpdateExternalReferenceMesh(int weight, std::vector<Vector3>* outVerts) {
@@ -2685,7 +3437,19 @@ void BodySlideApp::UpdateExternalReferenceMesh(int weight, std::vector<Vector3>*
 		}
 	}
 
-	preview->UpdateMeshes(referenceShapeName, &extRefVerts, &extRefUvs);
+	if (IsPreviewPosed() && previewAnimsBuilt) {
+		// The clipping fix works on the unposed body, only the display is posed
+		previewReferenceMorphedVerts = extRefVerts;
+
+		std::vector<Vector3> skinnedVerts = extRefVerts;
+		ApplyPreviewReferenceSkinning(skinnedVerts);
+		preview->UpdateMeshes(referenceShapeName, &skinnedVerts, &extRefUvs);
+	}
+	else {
+		previewReferenceMorphedVerts.clear();
+		preview->UpdateMeshes(referenceShapeName, &extRefVerts, &extRefUvs);
+	}
+
 	preview->SetMeshVisibility(referenceShapeName, true);
 
 	if (outVerts)
@@ -2763,17 +3527,18 @@ bool BodySlideApp::SetDefaultConfig() {
 	Config.SetDefaultBoolValue("Input/LeftMousePan", false);
 	Config.SetDefaultBoolValue("Input/BrushSettingsNearCursor", true);
 	Config.SetDefaultBoolValue("Input/MaskHistory", true);
-	Config.SetDefaultValue("Lights/Ambient", 20);
-	Config.SetDefaultValue("Lights/Frontal", 20);
-	Config.SetDefaultValue("Lights/Directional0", 60);
+	Config.SetDefaultBoolValue("Input/ShapeHoverHighlight", true);
+	Config.SetDefaultValue("Lights/Ambient", 15);
+	Config.SetDefaultValue("Lights/Frontal", 100);
+	Config.SetDefaultValue("Lights/Directional0", 0);
 	Config.SetDefaultValue("Lights/Directional0.x", -90);
 	Config.SetDefaultValue("Lights/Directional0.y", 10);
 	Config.SetDefaultValue("Lights/Directional0.z", 100);
-	Config.SetDefaultValue("Lights/Directional1", 60);
+	Config.SetDefaultValue("Lights/Directional1", 0);
 	Config.SetDefaultValue("Lights/Directional1.x", 70);
 	Config.SetDefaultValue("Lights/Directional1.y", 10);
 	Config.SetDefaultValue("Lights/Directional1.z", 100);
-	Config.SetDefaultValue("Lights/Directional2", 85);
+	Config.SetDefaultValue("Lights/Directional2", 0);
 	Config.SetDefaultValue("Lights/Directional2.x", 30);
 	Config.SetDefaultValue("Lights/Directional2.y", 20);
 	Config.SetDefaultValue("Lights/Directional2.z", -100);
@@ -2789,6 +3554,7 @@ bool BodySlideApp::SetDefaultConfig() {
 	BodySlideConfig.SetDefaultBoolValue("BodySlideFrame.previewVisible", false);
 	BodySlideConfig.SetDefaultBoolValue("BodySlideFrame.previewPoppedOut", false);
 	BodySlideConfig.SetDefaultBoolValue("BodySlideFrame.previewAlwaysDetached", false);
+	BodySlideConfig.SetDefaultBoolValue("BodySlideFrame.previewOnLeft", false);
 
 	const wxSize previewSize = wxWindow::FromDIP(wxSize(720 + xborder * 2, 720 + yborder * 2), nullptr);
 	BodySlideConfig.SetDefaultValue("PreviewFrame.width", previewSize.GetWidth());
@@ -2855,6 +3621,25 @@ bool BodySlideApp::SetDefaultConfig() {
 	}
 
 	return true;
+}
+
+void BodySlideApp::ApplyComplexMaterialSetting() {
+	if (preview)
+		preview->SetComplexMaterialEnabled(BodySlideConfig.GetBoolValue("Rendering/ComplexMaterial", true));
+}
+
+void BodySlideApp::ApplyPBRSetting() {
+	if (!preview)
+		return;
+
+	// True PBR decides which shader files a shape is given rather than feeding a uniform, and the pair
+	// is picked while the textures are assigned, so the meshes have to be built again to pick it up.
+	const bool pbrEnabled = BodySlideConfig.GetBoolValue("Rendering/TruePBR", true);
+	if (pbrEnabled == preview->IsPBREnabled())
+		return;
+
+	preview->SetPBREnabled(pbrEnabled);
+	RebuildPreviewMeshes();
 }
 
 bool BodySlideApp::ShowSetup() {
@@ -3271,8 +4056,10 @@ void BodySlideApp::ApplyOutfitFilter() {
 				if (outFile.second.size() > 1) {
 					bool isInConflict = std::find(outFile.second.cbegin(), outFile.second.cend(), no) != outFile.second.cend();
 					if (isInConflict) {
+						// Ignore saved choices of outfits that no longer exist
 						std::string choice = buildSelection.GetOutputChoice(outFile.first);
-						if (!choice.empty() && choice != no) {
+						bool choiceExists = std::find(outFile.second.cbegin(), outFile.second.cend(), choice) != outFile.second.cend();
+						if (!choice.empty() && choice != no && choiceExists) {
 							filteredOut = true;
 							break;
 						}
@@ -3286,40 +4073,47 @@ void BodySlideApp::ApplyOutfitFilter() {
 	}
 
 
-	if (outfitSrch.empty()) {
-		for (auto& w : workFilterList)
-			filteredOutfits.push_back(w);
-	}
-	else {
-		wxString searchStr = wxString::FromUTF8(outfitSrch);
-		searchStr.MakeLower();
-
-		if (regexFilterOutfits) {
-			std::regex re;
-
-			for (auto& filterEntry : workFilterList) {
-				try {
-					re.assign(outfitSrch, std::regex::icase);
-					if (std::regex_search(filterEntry, re))
-						filteredOutfits.push_back(filterEntry);
-				}
-				catch (std::regex_error&) {
-				}
-			}
-		}
-		else {
-			for (auto& filterEntry : workFilterList) {
-				wxString entryStr = wxString::FromUTF8(filterEntry);
-				if (entryStr.Lower().Contains(searchStr))
-					filteredOutfits.push_back(entryStr.ToUTF8().data());
-			}
-		}
-	}
+	filteredOutfits = FilterOutfitNames(workFilterList, outfitSrch, regexFilterOutfits);
 
 	SortOutfitNamesForDisplay(filteredOutfits);
 
 	BodySlideConfig.SetValue("LastGroupFilter", grpSrch.ToUTF8().data());
 	BodySlideConfig.SetValue("LastOutfitFilter", outfitSrch);
+}
+
+std::vector<std::string> BodySlideApp::FilterOutfitNames(const std::vector<std::string>& names, const std::string& filter, bool useRegex, std::string* regexError) const {
+	if (filter.empty())
+		return names;
+
+	std::vector<std::string> matches;
+
+	if (useRegex) {
+		std::regex re;
+
+		try {
+			re.assign(filter, std::regex::icase);
+		}
+		catch (const std::regex_error& e) {
+			if (regexError)
+				*regexError = e.what();
+
+			return matches;
+		}
+
+		for (auto& name : names)
+			if (std::regex_search(name, re))
+				matches.push_back(name);
+	}
+	else {
+		wxString searchStr = wxString::FromUTF8(filter);
+		searchStr.MakeLower();
+
+		for (auto& name : names)
+			if (wxString::FromUTF8(name).Lower().Contains(searchStr))
+				matches.push_back(name);
+	}
+
+	return matches;
 }
 
 std::vector<std::string> BodySlideApp::ApplyPresetFilter(const std::vector<std::string>& presetNames) {
@@ -3357,12 +4151,53 @@ int BodySlideApp::GetFilteredOutfits(std::vector<std::string>& outList) {
 	return outList.size();
 }
 
+void BodySlideApp::LoadCmdPresetFile() {
+	if (cmdPresetFile.empty())
+		return;
+
+	std::vector<std::string> noGroupFilter;
+	std::vector<std::string> loadedPresets;
+
+	// Loaded before the preset folder so that the file given on the command line wins on name conflicts.
+	if (!sliderManager.LoadPresetFile(cmdPresetFile, "", noGroupFilter, true, &loadedPresets)) {
+		wxLogError("Failed to load preset file '%s' from the command line.", cmdPresetFile);
+		cmdPresetFile.clear();
+		cmdPresetPending = false;
+		return;
+	}
+
+	// The presets of the file are loaded again whenever the preset collection was cleared, the name is only resolved once.
+	if (cmdPresetResolved)
+		return;
+
+	cmdPresetResolved = true;
+
+	if (!cmdPreset.empty()) {
+		if (std::find(loadedPresets.begin(), loadedPresets.end(), cmdPreset) == loadedPresets.end())
+			wxLogWarning("Preset '%s' was not found in preset file '%s' from the command line.", cmdPreset, cmdPresetFile);
+
+		return;
+	}
+
+	if (loadedPresets.empty()) {
+		wxLogWarning("No presets found in preset file '%s' from the command line.", cmdPresetFile);
+		cmdPresetPending = false;
+		return;
+	}
+
+	// Without an explicit name, the first preset of the file is used.
+	cmdPreset = loadedPresets.front();
+	wxLogMessage("Using preset '%s' of preset file '%s' from the command line.", cmdPreset, cmdPresetFile);
+}
+
 void BodySlideApp::LoadPresets(const std::string& sliderSet) {
 	std::string outfit = sliderSet;
 	if (sliderSet.empty())
 		outfit = BodySlideConfig["SelectedOutfit"];
 
 	wxLogMessage("Loading assigned presets...");
+
+	LoadCmdPresetFile();
 
 	std::vector<std::string> groups_and_aliases;
 	for (auto& g : presetGroups) {
@@ -3710,32 +4545,24 @@ int BodySlideApp::BuildBodies(bool localPath, bool clean, bool tri, bool forceNo
 				wxMessageBox(wxString().Format(_("Failed to write TRI file to the following location\n\n%s"), triPath), _("Unable to process"), wxOK | wxICON_ERROR);
 			}
 
-			if (targetGame != FO4 && targetGame != FO4VR && targetGame != FO76) {
-				for (auto targetShape = activeSet.ShapesBegin(); targetShape != activeSet.ShapesEnd(); ++targetShape) {
-					auto shape = nifBig.FindBlockByName<NiShape>(targetShape->first);
-					if (!shape)
-						continue;
+			bool triToRoot = targetGame == FO4 || targetGame == FO4VR || targetGame == FO76;
 
-					if (tri && shape->GetNumVertices() > 0) {
-						AddTriData(nifBig, targetShape->first, triPathTrimmed);
-						if (activeSet.GenWeights())
-							AddTriData(nifSmall, targetShape->first, triPathTrimmed);
-
-						tri = false;
-					}
-				}
-			}
-			else {
-				AddTriData(nifBig, "", triPathTrimmed, true);
-				if (activeSet.GenWeights())
-					AddTriData(nifSmall, "", triPathTrimmed, true);
-			}
+			SetTriData(nifBig, triPathTrimmed, triToRoot);
+			if (activeSet.GenWeights())
+				SetTriData(nifSmall, triPathTrimmed, triToRoot);
 
 			// Set all shapes to dynamic/mutable
 			for (auto it = activeSet.ShapesBegin(); it != activeSet.ShapesEnd(); ++it) {
 				nifBig.SetShapeDynamic(it->first);
 				if (activeSet.GenWeights())
 					nifSmall.SetShapeDynamic(it->first);
+			}
+
+			// RaceMenu recalculates normals after applying morphs unless they're locked
+			if (targetGame == SKYRIMSE || targetGame == SKYRIMVR) {
+				SetLockedNormalsData(nifBig, activeSet);
+				if (activeSet.GenWeights())
+					SetLockedNormalsData(nifSmall, activeSet);
 			}
 		}
 		else if (!triKeep) {
@@ -3833,6 +4660,10 @@ int BodySlideApp::ShowBuildOverrideWithPreview(wxDialog* dlg, wxTreeListCtrl* tr
 	// Save the main app state so the conflicts preview doesn't corrupt it.
 	// LoadProjects() -> CleanupPreview() -> AddProjectSliders() all operate on
 	// shared app members (projects, sliderManager, multiProjectMode).
+	// The preview skinning describes the main projects, so it can't outlive the swap.
+	previewAnimPlaying = false;
+	ReleasePreviewSkinning();
+
 	PreviewPanel* savedPreview = preview;
 	PreviewWindow* savedPreviewWindow = previewWindow;
 	auto savedProjects = std::move(projects);
@@ -3918,6 +4749,12 @@ int BodySlideApp::ShowBuildOverrideWithPreview(wxDialog* dlg, wxTreeListCtrl* tr
 	multiProjectMode = savedMultiProjectMode;
 	std::swap(sliderManager, savedSliderManager);
 
+	// The pose may have been changed from the conflicts preview
+	if (preview) {
+		preview->RefreshPoseControls();
+		UpdatePreview();
+	}
+
 	return result;
 }
 
@@ -3967,6 +4804,7 @@ int BodySlideApp::BuildListBodies(
 
 	std::vector<std::string> outFileList;
 	std::vector<wxArrayString> choicesList;
+	std::vector<std::pair<std::string, std::string>> implicitChoices;
 	for (auto& outFile : outFileCount) {
 		if (outFile.second.size() > 1) {
 			wxArrayString selOutfits;
@@ -3976,21 +4814,28 @@ int BodySlideApp::BuildListBodies(
 					selOutfits.Add(wxString::FromUTF8(outfit));
 			}
 
-			// Same file would not be written more than once
-			if (selOutfits.size() <= 1)
+			// Same file would not be written more than once, but the only selected outfit becomes the output choice
+			if (selOutfits.size() <= 1) {
+				if (selOutfits.size() == 1 && !clean)
+					implicitChoices.emplace_back(outFile.first, selOutfits[0].ToUTF8().data());
 				continue;
+			}
 
 			outFileList.push_back(outFile.first);
 			choicesList.push_back(selOutfits);
 		}
 	}
 
-	if (!choicesList.empty()) {
-		// Load BuildSelection file or create new one
-		BuildSelectionFile buildSelFile;
-		BuildSelection buildSelection;
+	// Load BuildSelection file or create new one
+	BuildSelectionFile buildSelFile;
+	BuildSelection buildSelection;
+	if (!choicesList.empty() || !implicitChoices.empty())
 		GetBuildSelection(buildSelFile, buildSelection);
 
+	for (auto& implicitChoice : implicitChoices)
+		buildSelection.SetOutputChoice(implicitChoice.first, implicitChoice.second);
+
+	if (!choicesList.empty()) {
 		wxXmlResource* rsrc = wxXmlResource::Get();
 		wxDialog* dlgBuildOverride = rsrc->LoadDialog(sliderView, "dlgBuildOverride");
 		dlgBuildOverride->SetSize(dlgBuildOverride->FromDIP(wxSize(800, 400)));
@@ -4182,7 +5027,9 @@ int BodySlideApp::BuildListBodies(
 
 
 		delete dlgBuildOverride;
+	}
 
+	if (!choicesList.empty() || !implicitChoices.empty()) {
 		// Save output choices to file
 		buildSelFile.UpdateOutputChoices(buildSelection);
 		buildSelFile.Save();
@@ -4633,7 +5480,6 @@ int BodySlideApp::BuildListBodies(
 
 			/* Add TRI path for in-game morphs */
 			if (tri && !triKeep) {
-				bool triEnd = tri;
 				std::string triPath = currentSet.GetOutputFilePath() + ".tri";
 				std::string triPathTrimmed = triPath;
 				triPathTrimmed = std::regex_replace(triPathTrimmed, std::regex("/+|\\\\+"),
@@ -4645,32 +5491,24 @@ int BodySlideApp::BuildListBodies(
 				if (!WriteMorphTRI(outFileNameBig, currentSet, nifBig, zapIdxAll))
 					wxLogError("Failed to create TRI file to '%s'!", triPath);
 
-				if (targetGame != FO4 && targetGame != FO4VR && targetGame != FO76) {
-					for (auto targetShape = currentSet.ShapesBegin(); targetShape != currentSet.ShapesEnd(); ++targetShape) {
-						auto shape = nifBig.FindBlockByName<NiShape>(targetShape->first);
-						if (!shape)
-							continue;
+				bool triToRoot = targetGame == FO4 || targetGame == FO4VR || targetGame == FO76;
 
-						if (triEnd && shape->GetNumVertices() > 0) {
-							AddTriData(nifBig, targetShape->first, triPathTrimmed);
-							if (currentSet.GenWeights())
-								AddTriData(nifSmall, targetShape->first, triPathTrimmed);
-
-							triEnd = false;
-						}
-					}
-				}
-				else {
-					AddTriData(nifBig, "", triPathTrimmed, true);
-					if (currentSet.GenWeights())
-						AddTriData(nifSmall, "", triPathTrimmed, true);
-				}
+				SetTriData(nifBig, triPathTrimmed, triToRoot);
+				if (currentSet.GenWeights())
+					SetTriData(nifSmall, triPathTrimmed, triToRoot);
 
 				// Set all shapes to dynamic/mutable
 				for (auto it = currentSet.ShapesBegin(); it != currentSet.ShapesEnd(); ++it) {
 					nifBig.SetShapeDynamic(it->first);
 					if (currentSet.GenWeights())
 						nifSmall.SetShapeDynamic(it->first);
+				}
+
+				// RaceMenu recalculates normals after applying morphs unless they're locked
+				if (targetGame == SKYRIMSE || targetGame == SKYRIMVR) {
+					SetLockedNormalsData(nifBig, currentSet);
+					if (currentSet.GenWeights())
+						SetLockedNormalsData(nifSmall, currentSet);
 				}
 			}
 			else if (!triKeep) {
@@ -4754,22 +5592,86 @@ int BodySlideApp::BuildListBodies(
 	return 0;
 }
 
-void BodySlideApp::GroupBuild(const std::vector<std::string>& groupNames) {
-	std::vector<std::string> outfits;
-	for (auto& o : outfitNameSource) {
-		std::vector<std::string> groups;
-		gCollection.GetOutfitGroups(o.first, groups);
+std::vector<std::string> BodySlideApp::GetCmdLineBuildOutfits(std::map<std::string, std::string>& failedOutfits) {
+	// Collected case insensitively, so the same outfit selected by several options is only built once.
+	std::set<std::string, case_insensitive_compare> selected;
 
-		for (auto& g : groups) {
-			if (std::find(groupNames.begin(), groupNames.end(), g) != groupNames.end()) {
-				outfits.push_back(o.first);
-				break;
+	// The groups and the filter narrow the outfit list down together, the same way the group filter
+	// and the outfit filter box do in the GUI. Outfits named with the build option are added on top.
+	if (!cmdGroupBuild.empty() || !cmdBuildFilter.empty()) {
+		std::vector<std::string> matches = outfitNameOrder;
+
+		if (!cmdGroupBuild.empty()) {
+			matches.clear();
+
+			for (auto& no : outfitNameOrder) {
+				std::vector<std::string> groups;
+				gCollection.GetOutfitGroups(no, groups);
+
+				for (auto& g : groups) {
+					if (std::find(cmdGroupBuild.begin(), cmdGroupBuild.end(), g) != cmdGroupBuild.end()) {
+						matches.push_back(no);
+						break;
+					}
+				}
+			}
+
+			wxLogMessage("Command-line build: %d outfit(s) belong to the specified group(s).", (int)matches.size());
+
+			if (matches.empty())
+				failedOutfits["--groupbuild"] = _("No outfit belongs to any of the specified groups.").ToUTF8().data();
+		}
+
+		if (!cmdBuildFilter.empty() && !matches.empty()) {
+			std::string regexError;
+			matches = FilterOutfitNames(matches, cmdBuildFilter, cmdBuildFilterRegex, &regexError);
+
+			if (!regexError.empty()) {
+				wxLogError("Invalid regular expression '%s' from the command line: %s", cmdBuildFilter, regexError);
+				failedOutfits[cmdBuildFilter] = wxString::Format(_("Invalid regular expression: %s"), regexError).ToUTF8().data();
+			}
+			else {
+				wxLogMessage("Command-line build: %d outfit(s) match the filter '%s'.", (int)matches.size(), cmdBuildFilter);
+
+				if (matches.empty())
+					failedOutfits[cmdBuildFilter] = _("Filter doesn't match any outfit.").ToUTF8().data();
 			}
 		}
+
+		selected.insert(matches.begin(), matches.end());
 	}
 
+	for (auto& outfitName : cmdBuildOutfits) {
+		auto sourceIt = outfitNameSource.find(outfitName);
+		if (sourceIt == outfitNameSource.end()) {
+			wxLogError("Outfit '%s' from the command line doesn't exist.", outfitName);
+			failedOutfits[outfitName] = _("Outfit doesn't exist.").ToUTF8().data();
+			continue;
+		}
+
+		// Insert the name as it's defined in the slider set, not as it was spelled on the command line.
+		selected.insert(sourceIt->first);
+	}
+
+	// Built in the order the outfits were loaded in, no matter which option selected them.
+	std::vector<std::string> outfits;
+	for (auto& no : outfitNameOrder)
+		if (selected.find(no) != selected.end())
+			outfits.push_back(no);
+
+	return outfits;
+}
+
+void BodySlideApp::CommandLineBuild() {
+	std::map<std::string, std::string> failedOutfits;
+	std::vector<std::string> outfits = GetCmdLineBuildOutfits(failedOutfits);
+
+	// Loaded before the preset folder so that a preset file given on the command line wins on name conflicts.
+	LoadCmdPresetFile();
+
 	std::string preset;
-	if (!cmdPreset.empty()) {
+	bool presetOverride = !cmdPreset.empty();
+	if (presetOverride) {
 		preset = BodySlideConfig["SelectedPreset"];
 		BodySlideConfig.SetValue("SelectedPreset", cmdPreset);
 	}
@@ -4777,7 +5679,7 @@ void BodySlideApp::GroupBuild(const std::vector<std::string>& groupNames) {
 	std::vector<std::string> groups;
 	sliderManager.LoadPresets(ProjectUtil::GetProjectSubPath("SliderPresets"), "", groups, true);
 
-	// Apply saved build selections for CLI group builds before entering batch build conflict handling.
+	// Apply saved build selections for command-line builds before entering batch build conflict handling.
 	BuildSelectionFile buildSelFile;
 	BuildSelection buildSelection;
 	GetBuildSelection(buildSelFile, buildSelection);
@@ -4816,23 +5718,22 @@ void BodySlideApp::GroupBuild(const std::vector<std::string>& groupNames) {
 		}
 
 		if (removedChoices > 0) {
-			wxLogMessage("Group build applied saved BuildSelection for output '%s': selected '%s', skipped %d conflicting choice(s).",
+			wxLogMessage("Command-line build applied saved BuildSelection for output '%s': selected '%s', skipped %d conflicting choice(s).",
 						 outFile.first,
 						 outputChoice,
 						 removedChoices);
 		}
 	}
 
-	std::map<std::string, std::string> failedOutfits;
 	int ret = BuildListBodies(outfits, failedOutfits, false, cmdTri, false, cmdTargetDir);
 
-	if (!cmdPreset.empty())
+	if (presetOverride)
 		BodySlideConfig.SetValue("SelectedPreset", preset);
 
 	wxLog::FlushActive();
 
 	if (ret == 0) {
-		wxLogMessage("All group build sets processed successfully!");
+		wxLogMessage("All command-line build sets processed successfully!");
 	}
 	else if (ret == 3) {
 		wxArrayString errlist;
@@ -4849,19 +5750,81 @@ void BodySlideApp::GroupBuild(const std::vector<std::string>& groupNames) {
 	sliderView->Close(true);
 }
 
-void BodySlideApp::AddTriData(NifFile& nif, const std::string& shapeName, const std::string& triPath, bool toRoot) {
+void BodySlideApp::SetTriData(NifFile& nif, const std::string& triPath, bool toRoot) {
+	auto& hdr = nif.GetHeader();
+
+	// Get rid of every BODYTRI block in the file, no matter where it's attached
+	std::vector<uint32_t> obsoleteIds;
+
+	for (uint32_t id = 0; id < hdr.GetNumBlocks(); id++) {
+		auto stringExtraData = hdr.GetBlock<NiStringExtraData>(id);
+		if (stringExtraData && stringExtraData->name.get() == "BODYTRI")
+			obsoleteIds.push_back(id);
+	}
+
+	// Delete the highest block ids first to keep the remaining ones valid
+	for (auto it = obsoleteIds.rbegin(); it != obsoleteIds.rend(); ++it)
+		hdr.DeleteBlock(*it);
+
+	// Fallout reads the path from the root node, the other games from a shape
 	NiAVObject* target = nullptr;
 
-	if (toRoot)
+	if (toRoot) {
 		target = nif.GetRootNode();
-	else
-		target = nif.FindBlockByName<NiShape>(shapeName);
+	}
+	else {
+		for (auto& shape : nif.GetShapes()) {
+			if (shape->GetNumVertices() > 0) {
+				target = shape;
+				break;
+			}
+		}
+	}
 
-	if (target) {
-		auto triExtraData = std::make_unique<NiStringExtraData>();
-		triExtraData->name.get() = "BODYTRI";
-		triExtraData->stringData.get() = triPath;
-		nif.AssignExtraData(target, std::move(triExtraData));
+	if (!target)
+		return;
+
+	auto triExtraData = std::make_unique<NiStringExtraData>();
+	triExtraData->name.get() = "BODYTRI";
+	triExtraData->stringData.get() = triPath;
+	nif.AssignExtraData(target, std::move(triExtraData));
+}
+
+void BodySlideApp::SetLockedNormalsData(NifFile& nif, SliderSet& sliderSet) {
+	auto& hdr = nif.GetHeader();
+
+	for (auto it = sliderSet.ShapesBegin(); it != sliderSet.ShapesEnd(); ++it) {
+		if (!it->second.lockNormals)
+			continue;
+
+		auto shape = nif.FindBlockByName<NiShape>(it->first);
+		if (!shape)
+			continue;
+
+		uint32_t numVerts = shape->GetNumVertices();
+		if (numVerts == 0)
+			continue;
+
+		// Reuse an existing LOCKEDNORM block of the shape
+		NiIntegersExtraData* lockedNormalsData = nullptr;
+		for (auto& extraDataRef : shape->extraDataRefs) {
+			auto integersExtraData = hdr.GetBlock<NiIntegersExtraData>(extraDataRef);
+			if (integersExtraData && integersExtraData->name == "LOCKEDNORM") {
+				lockedNormalsData = integersExtraData;
+				break;
+			}
+		}
+
+		if (!lockedNormalsData) {
+			auto newExtraData = std::make_unique<NiIntegersExtraData>();
+			newExtraData->name.get() = "LOCKEDNORM";
+			lockedNormalsData = newExtraData.get();
+			nif.AssignExtraData(shape, std::move(newExtraData));
+		}
+
+		lockedNormalsData->integersData.resize(numVerts);
+		for (uint32_t i = 0; i < numVerts; i++)
+			lockedNormalsData->integersData[i] = i;
 	}
 }
 
@@ -4962,13 +5925,24 @@ BodySlideFrame::BodySlideFrame(BodySlideApp* a, const wxSize& size)
 	// Create embedded preview panel
 	previewPanel = new PreviewPanel(splitter, app);
 
-	// Read sash position and visibility from config
+	// Read sash position, side and visibility from config
 	previewVisible = BodySlideConfig.GetBoolValue("BodySlideFrame.previewVisible", false);
+	previewOnLeft = BodySlideConfig.GetBoolValue("BodySlideFrame.previewOnLeft", false);
 	savedSashPosition = BodySlideConfig.GetIntValue("BodySlideFrame.sashpos");
 	savedPreviewWidth = BodySlideConfig.GetIntValue("BodySlideFrame.previewWidth");
 
 	if (previewVisible) {
-		splitter->SplitVertically(leftPanel, previewPanel, savedSashPosition);
+		if (previewOnLeft) {
+			// The sash position is the preview width when the preview is the first pane
+			int previewWidth = savedPreviewWidth;
+			if (previewWidth <= 0)
+				previewWidth = FromDIP(400);
+
+			splitter->SplitVertically(previewPanel, leftPanel, previewWidth);
+		}
+		else {
+			splitter->SplitVertically(leftPanel, previewPanel, savedSashPosition);
+		}
 	}
 	else {
 		splitter->Initialize(leftPanel);
@@ -6253,7 +7227,7 @@ void BodySlideFrame::OnSashPosChanged(wxSplitterEvent& event) {
 	int pos = event.GetSashPosition();
 	BodySlideConfig.SetValue("BodySlideFrame.sashpos", pos);
 	savedSashPosition = pos;
-	savedPreviewWidth = splitter->GetSize().GetWidth() - pos;
+	savedPreviewWidth = previewOnLeft ? pos : splitter->GetSize().GetWidth() - pos;
 	if (savedPreviewWidth > 0)
 		BodySlideConfig.SetValue("BodySlideFrame.previewWidth", savedPreviewWidth);
 }
@@ -6262,9 +7236,18 @@ void BodySlideFrame::OnSashPosChanging(wxSplitterEvent& event) {
 	if (!splitter || !splitter->IsSplit())
 		return;
 
-	const int minLeftWidth = FromDIP(MinBodySlideLeftPaneWidthDip);
-	if (event.GetSashPosition() < minLeftWidth) {
-		event.SetSashPosition(minLeftWidth);
+	const int minMainWidth = FromDIP(MinBodySlideLeftPaneWidthDip);
+	if (previewOnLeft) {
+		// The main pane is on the right, so the sash may not move too far right
+		int maxSashPos = splitter->GetSize().GetWidth() - minMainWidth;
+		if (maxSashPos < splitter->GetMinimumPaneSize())
+			maxSashPos = splitter->GetMinimumPaneSize();
+
+		if (event.GetSashPosition() > maxSashPos)
+			event.SetSashPosition(maxSashPos);
+	}
+	else if (event.GetSashPosition() < minMainWidth) {
+		event.SetSashPosition(minMainWidth);
 	}
 }
 
@@ -6287,7 +7270,7 @@ void BodySlideFrame::UnsplitPreview() {
 		return;
 
 	savedSashPosition = splitter->GetSashPosition();
-	savedPreviewWidth = splitter->GetSize().GetWidth() - savedSashPosition;
+	savedPreviewWidth = previewOnLeft ? savedSashPosition : splitter->GetSize().GetWidth() - savedSashPosition;
 	BodySlideConfig.SetValue("BodySlideFrame.sashpos", savedSashPosition);
 	BodySlideConfig.SetValue("BodySlideFrame.previewWidth", savedPreviewWidth);
 	splitter->Unsplit(previewPanel);
@@ -6313,18 +7296,74 @@ void BodySlideFrame::SplitPreview(wxPanel* panel) {
 	if (previewWidth <= 0)
 		previewWidth = 400;
 
-	int sashPos = savedSashPosition;
-	if (sashPos <= 0)
-		sashPos = BodySlideConfig.GetIntValue("BodySlideFrame.sashpos");
-	if (sashPos <= 0)
-		sashPos = GetClientSize().GetWidth();
+	// With the preview on the left, the sash position is the preview width itself
+	int sashPos = previewWidth;
+	if (!previewOnLeft) {
+		sashPos = savedSashPosition;
+		if (sashPos <= 0)
+			sashPos = BodySlideConfig.GetIntValue("BodySlideFrame.sashpos");
+		if (sashPos <= 0)
+			sashPos = GetClientSize().GetWidth();
+	}
 
 	wxSize sz = GetSize();
 	sz.SetWidth(sz.GetWidth() + previewWidth);
 	SetSize(sz);
 
 	panelToSplit->Show();
-	splitter->SplitVertically(leftPanel, panelToSplit, sashPos);
+
+	if (previewOnLeft)
+		splitter->SplitVertically(panelToSplit, leftPanel, sashPos);
+	else
+		splitter->SplitVertically(leftPanel, panelToSplit, sashPos);
+
+	savedSashPosition = sashPos;
+	savedPreviewWidth = previewWidth;
+}
+
+void BodySlideFrame::SetPreviewOnLeft(bool onLeft) {
+	if (previewOnLeft == onLeft)
+		return;
+
+	if (!splitter || !splitter->IsSplit()) {
+		previewOnLeft = onLeft;
+		return;
+	}
+
+	// Keep the current preview width and swap the panes in place, without resizing the frame
+	const int splitterWidth = splitter->GetSize().GetWidth();
+	const int sashPos = splitter->GetSashPosition();
+
+	int previewWidth = previewOnLeft ? sashPos : splitterWidth - sashPos;
+	if (previewWidth <= 0)
+		previewWidth = savedPreviewWidth;
+	if (previewWidth <= 0)
+		previewWidth = FromDIP(400);
+
+	wxWindow* previewPane = splitter->GetWindow1() == leftPanel ? splitter->GetWindow2() : splitter->GetWindow1();
+	if (!previewPane) {
+		previewOnLeft = onLeft;
+		return;
+	}
+
+	previewOnLeft = onLeft;
+
+	splitter->Unsplit(previewPane);
+	previewPane->Show();
+
+	int newSashPos = onLeft ? previewWidth : splitterWidth - previewWidth;
+	if (newSashPos < splitter->GetMinimumPaneSize())
+		newSashPos = splitter->GetMinimumPaneSize();
+
+	if (onLeft)
+		splitter->SplitVertically(previewPane, leftPanel, newSashPos);
+	else
+		splitter->SplitVertically(leftPanel, previewPane, newSashPos);
+
+	savedSashPosition = newSashPos;
+	savedPreviewWidth = previewWidth;
+	BodySlideConfig.SetValue("BodySlideFrame.sashpos", newSashPos);
+	BodySlideConfig.SetValue("BodySlideFrame.previewWidth", previewWidth);
 }
 
 void BodySlideFrame::UpdatePreviewButtonLabel() {
@@ -6442,8 +7481,10 @@ void BodySlideFrame::OnBatchBuild(wxCommandEvent& WXUNUSED(event)) {
 			if (outfitsInBuild.size() <= 1)
 				continue;
 
+			// Ignore saved choices of outfits that no longer exist
 			std::string outputChoice = buildSelection.GetOutputChoice(outFile.first);
-			if (!outputChoice.empty()) {
+			bool choiceExists = std::find(outFile.second.cbegin(), outFile.second.cend(), outputChoice) != outFile.second.cend();
+			if (!outputChoice.empty() && choiceExists) {
 				for (auto& outfit : outfitsInBuild) {
 					if (outfit != outputChoice) {
 						// Uncheck choice by default
@@ -6613,6 +7654,8 @@ void BodySlideFrame::OnSettings(wxCommandEvent& WXUNUSED(event)) {
 		wxCollapsiblePane* advancedPane = XRCCTRL(*settings, "advancedPane", wxCollapsiblePane);
 		advancedPane->Bind(wxEVT_COLLAPSIBLEPANE_CHANGED, [&settings](wxCommandEvent&) { settings->Fit(); });
 
+		const std::string prevSkeletonReference = Config["Anim/DefaultSkeletonReference"];
+
 		SettingsDialogShared::CommonSettingsDialogControls commonControls{};
 		SettingsDialogShared::InitCommonSettingsDialog(*settings,
 			Config,
@@ -6625,6 +7668,9 @@ void BodySlideFrame::OnSettings(wxCommandEvent& WXUNUSED(event)) {
 
 		wxCheckBox* cbPreviewAlwaysDetached = XRCCTRL(*settings, "cbPreviewAlwaysDetached", wxCheckBox);
 		cbPreviewAlwaysDetached->SetValue(BodySlideConfig.GetBoolValue("BodySlideFrame.previewAlwaysDetached", false));
+
+		wxCheckBox* cbPreviewOnLeft = XRCCTRL(*settings, "cbPreviewOnLeft", wxCheckBox);
+		cbPreviewOnLeft->SetValue(BodySlideConfig.GetBoolValue("BodySlideFrame.previewOnLeft", false));
 
 		// Hide the single instance setting (only relevant for Outfit Studio)
 		XRCCTRL(*settings, "lbSingleInstanceBehavior", wxStaticText)->Hide();
@@ -6652,10 +7698,23 @@ void BodySlideFrame::OnSettings(wxCommandEvent& WXUNUSED(event)) {
 			TargetGame targ = (TargetGame)targetGameSelection;
 
 			BodySlideConfig.SetBoolValue("BodySlideFrame.previewAlwaysDetached", cbPreviewAlwaysDetached->IsChecked());
+			BodySlideConfig.SetBoolValue("BodySlideFrame.previewOnLeft", cbPreviewOnLeft->IsChecked());
+			SetPreviewOnLeft(cbPreviewOnLeft->IsChecked());
+
+			// Only feeds a uniform, so the meshes and their textures stay as they are
+			app->ApplyComplexMaterialSetting();
+
+			// This one picks the shader files, so it rebuilds the preview meshes when it changed
+			app->ApplyPBRSetting();
 
 			Config.SaveConfig(Config["AppDir"] + "/Config.xml");
 			app->SaveFavorites();
+			// Poses and animations are made for one game's skeleton, and the
+			// preview skinning was built on the skeleton loaded before
+			const bool skeletonChanged = targ != app->targetGame || Config["Anim/DefaultSkeletonReference"] != prevSkeletonReference;
 			app->targetGame = targ;
+			if (skeletonChanged)
+				app->ResetPreviewPoses();
 			app->LoadFavorites();
 			GameUtil::InitArchives();
 			app->LoadAllCategories();

@@ -10,6 +10,7 @@ See the included LICENSE file
 #include <cstddef>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -19,6 +20,7 @@ See the included LICENSE file
 #include <wx/choice.h>
 #include <wx/collpane.h>
 #include <wx/clrpicker.h>
+#include <wx/combo.h>
 #include <wx/combobox.h>
 #include <wx/dialog.h>
 #include <wx/event.h>
@@ -37,6 +39,7 @@ See the included LICENSE file
 
 class OutfitStudioFrame;
 class OutfitProject;
+class AutomationStepTypePopup;
 
 namespace nifly {
 class NiShape;
@@ -60,10 +63,17 @@ private:
 	int selectedStep = -1;
 	int varRowCount = 1;
 
+	// Variables defined by Set Variable steps while a script runs. Substituted into
+	// every following step, on top of the up front pass over the placeholder table.
+	std::map<std::string, std::string> runtimeVariables;
+	std::map<std::string, std::string> runBaseVariables;
+
 	wxListCtrl* listSteps = nullptr;
 	wxStaticText* lblStepsPlaceholder = nullptr;
 	wxSimplebook* bookStepPages = nullptr;
-	wxChoice* choiceStepType = nullptr;
+	wxComboCtrl* comboStepType = nullptr;
+	AutomationStepTypePopup* stepTypePopup = nullptr;
+	std::map<AutomationStepType, int> stepTypePageIndex;
 	wxCheckBox* chkActive = nullptr;
 	wxTextCtrl* txtTargetMeshes = nullptr;
 	wxCheckBox* chkTargetRegex = nullptr;
@@ -113,8 +123,8 @@ private:
 	void SetCheckboxValue(const char* name, bool value);
 	bool GetCheckboxValue(const char* name) const;
 	void SetTextValue(const char* name, const std::string& value);
+	void SetTextValue(const char* name, const wxString& value);
 	std::string GetTextValue(const char* name) const;
-	void SetFloatValue(const char* name, float value);
 	float GetFloatValue(const char* name) const;
 	int GetIntValue(const char* name) const;
 	void SetVectorValue(const char* name, const std::vector<std::string>& values);
@@ -130,6 +140,49 @@ private:
 	void SelectStep(int index);
 	void UpdateStepFromUI();
 	void UpdateUIFromStep(const AutomationStep& step);
+
+	// Generic marshalling driven by the step type's field table. Everything a
+	// plain control can express is handled here; the rest lives in the per-type
+	// UI hooks below, wired up in the step binding table.
+	void ApplyFieldsToUI(const AutomationStep& step);
+	void ReadFieldsFromUI(AutomationStep& step);
+
+	struct StepBinding {
+		AutomationStepType type;
+		int (AutomationDialog::*execute)(const AutomationStep&) = nullptr;
+		void (AutomationDialog::*toUI)(const AutomationStep&) = nullptr;
+		void (AutomationDialog::*fromUI)(AutomationStep&) = nullptr;
+	};
+	static const StepBinding* FindStepBinding(AutomationStepType type);
+
+	void ShowStepTypePage(AutomationStepType type);
+	void SetStepTypeSelection(AutomationStepType type);
+
+	void StepToUILoadReference(const AutomationStep& step);
+	void StepFromUILoadReference(AutomationStep& step);
+	void StepToUIAddProject(const AutomationStep& step);
+	void StepFromUIAddProject(AutomationStep& step);
+	void StepToUIImportFile(const AutomationStep& step);
+	void StepFromUIImportFile(AutomationStep& step);
+	void StepToUIImportSliderData(const AutomationStep& step);
+	void StepFromUIImportSliderData(AutomationStep& step);
+	void StepToUIExportFile(const AutomationStep& step);
+	void StepFromUIExportFile(AutomationStep& step);
+	void StepToUISaveProject(const AutomationStep& step);
+	void StepToUISetReferenceShape(const AutomationStep& step);
+	void StepToUISetExtraData(const AutomationStep& step);
+	void StepFromUISetExtraData(AutomationStep& step);
+	void StepToUILoadMask(const AutomationStep& step);
+	void StepFromUILoadMask(AutomationStep& step);
+	void StepToUISetSliderProperties(const AutomationStep& step);
+	void StepFromUISetSliderProperties(AutomationStep& step);
+	void StepToUISetShaderProperties(const AutomationStep& step);
+	void StepFromUISetShaderProperties(AutomationStep& step);
+	void StepToUISetGeometryProperties(const AutomationStep& step);
+	void StepFromUISetGeometryProperties(AutomationStep& step);
+	void StepToUISetTexturePaths(const AutomationStep& step);
+	void StepFromUISetTexturePaths(AutomationStep& step);
+
 	void RefreshStepRow(int index);
 	void ShowStepSettings(bool show);
 	void UpdateButtonState();
@@ -208,6 +261,7 @@ private:
 	int ExecuteStepRemoveSkinning(const AutomationStep& step);
 	int ExecuteStepApplyPose(const AutomationStep& step);
 	int ExecuteStepImportSliderData(const AutomationStep& step);
+	int ImportSliderDataFromTRI(const AutomationStep& step, const std::string& filePath);
 	int ExecuteStepImportFile(const AutomationStep& step);
 	int ExecuteStepDeleteShape(const AutomationStep& step);
 	int ExecuteStepRenameShape(const AutomationStep& step);
@@ -216,10 +270,12 @@ private:
 	int ExecuteStepRefineMesh(const AutomationStep& step);
 	int ExecuteStepDeleteSlider(const AutomationStep& step);
 	int ExecuteStepSetReferenceShape(const AutomationStep& step);
+	int ExecuteStepApplyTransforms(const AutomationStep& step);
 	int ExecuteStepResetTransforms(const AutomationStep& step);
 	int ExecuteStepDuplicateShape(const AutomationStep& step);
 	int ExecuteStepChangePartitions(const AutomationStep& step);
 	int ExecuteStepMirrorShape(const AutomationStep& step);
+	int ExecuteStepRecalcNormals(const AutomationStep& step);
 	int ExecuteStepLoadMask(const AutomationStep& step);
 	int ExecuteStepClearMask(const AutomationStep& step);
 	int ExecuteStepSetSliderProperties(const AutomationStep& step);
@@ -231,6 +287,33 @@ private:
 	int ExecuteStepRemoveUnusedNodes(const AutomationStep& step);
 	int ExecuteStepFixClipping(const AutomationStep& step);
 	int ExecuteStepFixBadBones(const AutomationStep& step);
+	int ExecuteStepAddBone(const AutomationStep& step);
+	int ExecuteStepTransferWeights(const AutomationStep& step);
+	int ExecuteStepSetBoneTransform(const AutomationStep& step);
+	int ExecuteStepMakeConversionRef(const AutomationStep& step);
+	int ExecuteStepCopySegPart(const AutomationStep& step);
+	int ExecuteStepDeleteVertices(const AutomationStep& step);
+	int ExecuteStepSeparateVertices(const AutomationStep& step);
+	int ExecuteStepMergeGeometry(const AutomationStep& step);
+	int ExecuteStepSymmetrizeVertices(const AutomationStep& step);
+	int ExecuteStepClearSliderData(const AutomationStep& step);
+	int ExecuteStepCloneSlider(const AutomationStep& step);
+	int ExecuteStepNegateSlider(const AutomationStep& step);
+	int ExecuteStepNewCombinedSlider(const AutomationStep& step);
+	int ExecuteStepNewZapSlider(const AutomationStep& step);
+	int ExecuteStepGrowShrinkMask(const AutomationStep& step);
+	int ExecuteStepInvertMask(const AutomationStep& step);
+	int ExecuteStepMaskAsymmetric(const AutomationStep& step);
+	int ExecuteStepMaskBoneWeighted(const AutomationStep& step);
+	int ExecuteStepMaskSliderAffected(const AutomationStep& step);
+	int ExecuteStepMaskWeighted(const AutomationStep& step);
+	int ExecuteStepSaveMask(const AutomationStep& step);
+	int ExecuteStepSetVariable(const AutomationStep& step);
+	int ExecuteStepLogMessage(const AutomationStep& step);
+
+	// Rebuilds the render meshes after a step changed vertex or triangle counts,
+	// carrying the remapped masks over to the new meshes.
+	void RefreshMeshesWithMasks(std::unordered_map<std::string, std::vector<float>>& maskStash);
 
 	std::vector<std::string> GatherBatchFiles();
 	std::vector<std::pair<std::string, std::string>> GatherBatchSliderSets();
@@ -252,7 +335,7 @@ private:
 	void OnStepSelected(wxListEvent& event);
 	void OnStepListKeyDown(wxKeyEvent& event);
 	void OnStepListContextMenu(wxContextMenuEvent& event);
-	void OnStepTypeChanged(wxCommandEvent& event);
+	void OnStepTypeChanged(AutomationStepType type);
 	void OnExecuteAll(wxCommandEvent& event);
 	void OnExecuteSelected(wxCommandEvent& event);
 	void OnClose(wxCommandEvent& event);

@@ -15,8 +15,12 @@ using namespace nifly;
 GLShader::GLShader(const std::string& vertexSource, const std::string& fragmentSource)
 	: GLShader() {
 	if (CheckExtensions() && LoadShaders(vertexSource, fragmentSource)) {
+		AssignDefaultSamplerUnits();
 		ShowLighting();
-		ShowTexture();
+		// Left off until something says the mesh has a diffuse worth sampling, which is what
+		// GLSurface::UpdateShaders decides. Starting it on would make a shape that never got that
+		// far sample a texture nobody bound, which draws it as nothing.
+		ShowTexture(false);
 		ShowMask();
 		ShowWeight(false);
 		ShowVertexColors(false);
@@ -60,6 +64,45 @@ bool GLShader::LoadShaderFile(const std::string& fileName, std::string& text) {
 		return false;
 
 	return true;
+}
+
+void GLShader::AssignDefaultSamplerUnits() {
+	// A freshly linked program has every sampler uniform on texture unit 0, which puts the
+	// samplerCube on the same unit as the sampler2Ds. A draw call with such a program is invalid
+	// whenever unit 0 happens to hold both a 2D and a cube texture (loading a cubemap leaves one
+	// bound there), and the driver then drops the draw with GL_INVALID_OPERATION. Hand every
+	// sampler its fixed unit up front - the same layout GLMaterial::BindTextures uses - so the
+	// program stays valid even for meshes that never bind any textures.
+	struct SamplerUnit {
+		const char* name;
+		GLint unit;
+	};
+
+	static const SamplerUnit samplerUnits[] = {
+		{"texDiffuse", 0},
+		{"texNormal", 1},
+		{"texGlowmap", 2},
+		{"texLightmask", 2},
+		{"texEmissive", 2},
+		{"texGreyscale", 3},
+		{"texCubemap", 4},
+		{"texEnvMask", 5},
+		{"texRMAOS", 5},
+		{"texFaceTint", 6},
+		{"texSpecular", 7},
+		{"texBacklight", 7},
+		{"texAlphaMask", 20},
+	};
+
+	glUseProgram(progID);
+
+	for (const auto& su : samplerUnits) {
+		GLint loc = glGetUniformLocation(progID, su.name);
+		if (loc >= 0)
+			glUniform1i(loc, su.unit);
+	}
+
+	glUseProgram(0);
 }
 
 bool GLShader::LoadShaders(const std::string& vertexSource, const std::string& fragmentSource) {
@@ -305,6 +348,10 @@ void GLShader::SetProperties(const Mesh::ShaderProperties& prop) {
 	if (loc >= 0)
 		glUniform1f(loc, prop.emissiveMultiple);
 
+	loc = glGetUniformLocation(progID, "prop.tintColor");
+	if (loc >= 0)
+		glUniform3f(loc, prop.tintColor.x, prop.tintColor.y, prop.tintColor.z);
+
 	loc = glGetUniformLocation(progID, "prop.alpha");
 	if (loc >= 0)
 		glUniform1f(loc, prop.alpha);
@@ -385,6 +432,11 @@ void GLShader::ShowVertexAlpha(bool bShow) {
 }
 
 void GLShader::ShowTexture(bool bShow) {
+	if (bShowTexture == bShow)
+		return;
+
+	bShowTexture = bShow;
+
 	GLint loc = glGetUniformLocation(progID, "bShowTexture");
 	if (loc >= 0) {
 		glUseProgram(progID);
@@ -411,6 +463,18 @@ void GLShader::SetGreyscaleColorEnabled(const bool enable) {
 		glUniform1i(loc, enable ? GL_TRUE : GL_FALSE);
 }
 
+void GLShader::SetTintColorEnabled(const bool enable) {
+	GLint loc = glGetUniformLocation(progID, "bTintColor");
+	if (loc >= 0)
+		glUniform1i(loc, enable ? GL_TRUE : GL_FALSE);
+}
+
+void GLShader::SetFaceTintEnabled(const bool enable) {
+	GLint loc = glGetUniformLocation(progID, "bFaceTint");
+	if (loc >= 0)
+		glUniform1i(loc, enable ? GL_TRUE : GL_FALSE);
+}
+
 void GLShader::SetCubemapEnabled(const bool enable) {
 	GLint loc = glGetUniformLocation(progID, "bCubemap");
 	if (loc >= 0)
@@ -421,6 +485,54 @@ void GLShader::SetEnvMaskEnabled(const bool enable) {
 	GLint loc = glGetUniformLocation(progID, "bEnvMask");
 	if (loc >= 0)
 		glUniform1i(loc, enable ? GL_TRUE : GL_FALSE);
+}
+
+void GLShader::SetComplexMaterialEnabled(const bool enable) {
+	GLint loc = glGetUniformLocation(progID, "bComplexMaterial");
+	if (loc >= 0)
+		glUniform1i(loc, enable ? GL_TRUE : GL_FALSE);
+}
+
+void GLShader::SetRMAOSEnabled(const bool enable) {
+	GLint loc = glGetUniformLocation(progID, "bRMAOS");
+	if (loc >= 0)
+		glUniform1i(loc, enable ? GL_TRUE : GL_FALSE);
+}
+
+void GLShader::SetPBREmissiveEnabled(const bool enable) {
+	GLint loc = glGetUniformLocation(progID, "bPBREmissive");
+	if (loc >= 0)
+		glUniform1i(loc, enable ? GL_TRUE : GL_FALSE);
+}
+
+void GLShader::SetDiffuseSRGB(const bool srgb) {
+	GLint loc = glGetUniformLocation(progID, "bDiffuseSRGB");
+	if (loc >= 0)
+		glUniform1i(loc, srgb ? GL_TRUE : GL_FALSE);
+}
+
+void GLShader::SetEmissiveSRGB(const bool srgb) {
+	GLint loc = glGetUniformLocation(progID, "bEmissiveSRGB");
+	if (loc >= 0)
+		glUniform1i(loc, srgb ? GL_TRUE : GL_FALSE);
+}
+
+void GLShader::SetCubemapMaxLod(const float maxLod) {
+	GLint loc = glGetUniformLocation(progID, "cubemapMaxLod");
+	if (loc >= 0)
+		glUniform1f(loc, maxLod);
+}
+
+void GLShader::SetCubemapMinLod(const float minLod) {
+	GLint loc = glGetUniformLocation(progID, "cubemapMinLod");
+	if (loc >= 0)
+		glUniform1f(loc, minLod);
+}
+
+void GLShader::SetCubemapTint(const nifly::Vector3& tint) {
+	GLint loc = glGetUniformLocation(progID, "cubemapTint");
+	if (loc >= 0)
+		glUniform3f(loc, tint.x, tint.y, tint.z);
 }
 
 void GLShader::SetSpecularEnabled(const bool enable) {
@@ -471,6 +583,18 @@ void GLShader::BindCubemap(const GLint& index, const GLuint& texture, const char
 
 		glBindTexture(GL_TEXTURE_CUBE_MAP, texture);
 	}
+}
+
+void GLShader::SetUniform(const char* name, const int value) {
+	GLint loc = glGetUniformLocation(progID, name);
+	if (loc >= 0)
+		glUniform1i(loc, value);
+}
+
+void GLShader::SetUniform(const char* name, const float value) {
+	GLint loc = glGetUniformLocation(progID, name);
+	if (loc >= 0)
+		glUniform1f(loc, value);
 }
 
 bool GLShader::GetError(std::string* errorStr) {

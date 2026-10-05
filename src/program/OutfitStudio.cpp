@@ -44,9 +44,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "../utils/StringStuff.h"
 #include "../utils/SettingsDialogShared.h"
 
+#include <cmath>
 #include <cstdlib>
+#include <iterator>
 #include <sstream>
 #include <wx/debugrpt.h>
+#include <wx/display.h>
 #include <wx/listctrl.h>
 #include <wx/textctrl.h>
 #include <wx/wfstream.h>
@@ -54,11 +57,44 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "ConvertBodyReferenceDialog.h"
 
+#ifdef __WXMSW__
+#include <wx/msw/wrapwin.h>
+
+#include <mmsystem.h>
+#endif
+
 using namespace nifly;
 
 namespace {
 
+// The playback timer only backs OnAnimIdle up for stretches where no idle events
+// arrive. It cannot pace playback on its own: on MSW it is a WM_TIMER, which
+// Windows rounds up to a multiple of the ~15.6 ms system clock tick, making 15 ms
+// the shortest useful request and 64 Hz the hard ceiling - measured, that holds
+// even with the clock resolution already raised.
+constexpr int AnimPlaybackTimerIntervalMS = 15;
+
+// Windows quantises waits to the system clock tick, ~15.6 ms by default, which
+// caps anything paced by sleeping at 64 Hz. Raising the resolution for the
+// duration of playback is what lets OnAnimIdle reach the display's refresh rate.
+// Since Windows 10 2004 this affects the calling process, not the whole system.
+void SetHighResolutionTimers(bool enable) {
+#ifdef __WXMSW__
+	if (enable)
+		timeBeginPeriod(1);
+	else
+		timeEndPeriod(1);
+#else
+	(void)enable;
+#endif
+}
+
 bool GetPoseHkxFormat(TargetGame targetGame, HKX::Format* outFormat = nullptr);
+
+// Same marks as BodySlide's favorite outfits, presets and animations
+constexpr const char* FavoriteStar = "\xE2\x98\x85";
+constexpr const char* FavoriteStarIcon = "/res/images/FavoriteStar.png";
+constexpr const char* FavoriteStarEmptyIcon = "/res/images/FavoriteStarEmpty.png";
 
 int GetPreferredPoseFileFilterIndex(TargetGame targetGame) {
 	switch (targetGame) {
@@ -164,6 +200,8 @@ wxBEGIN_EVENT_TABLE(OutfitStudioFrame, wxFrame)
 	EVT_BUTTON(XRCID("importMask"), OutfitStudioFrame::OnImportMask)
 
 	EVT_COLLAPSIBLEPANE_CHANGED(XRCID("posePane"), OutfitStudioFrame::OnPaneCollapse)
+	EVT_COLLAPSIBLEPANE_CHANGED(XRCID("physicsPane"), OutfitStudioFrame::OnPaneCollapse)
+	EVT_COLLAPSIBLEPANE_CHANGED(XRCID("animationPane"), OutfitStudioFrame::OnPaneCollapse)
 	EVT_COLLAPSIBLEPANE_CHANGED(XRCID("notesPane"), OutfitStudioFrame::OnPaneCollapse)
 	EVT_CHOICE(XRCID("cPoseBone"), OutfitStudioFrame::OnPoseBoneChanged)
 	EVT_COMMAND_SCROLL(XRCID("rxPoseSlider"), OutfitStudioFrame::OnRXPoseSlider)
@@ -184,12 +222,36 @@ wxBEGIN_EVENT_TABLE(OutfitStudioFrame, wxFrame)
 	EVT_BUTTON(XRCID("resetAllPose"), OutfitStudioFrame::OnResetAllPose)
 	EVT_BUTTON(XRCID("poseToMesh"), OutfitStudioFrame::OnPoseToMesh)
 	EVT_CHECKBOX(XRCID("cbPose"), OutfitStudioFrame::OnPoseCheckBox)
+	EVT_CHECKBOX(XRCID("cbPhysics"), OutfitStudioFrame::OnPhysicsCheckBox)
+	EVT_CHECKBOX(XRCID("cbPhysicsVis"), OutfitStudioFrame::OnPhysicsVisCheckBox)
+	EVT_CHECKBOX(XRCID("cbPhysicsGrab"), OutfitStudioFrame::OnPhysicsGrabCheckBox)
+	EVT_CHECKBOX(XRCID("cbPhysicsProbe"), OutfitStudioFrame::OnPhysicsProbeCheckBox)
+	EVT_COMMAND_SCROLL(XRCID("physicsProbeX"), OutfitStudioFrame::OnPhysicsProbeXSlider)
+	EVT_COMMAND_SCROLL(XRCID("physicsProbeY"), OutfitStudioFrame::OnPhysicsProbeYSlider)
+	EVT_COMMAND_SCROLL(XRCID("physicsProbeZ"), OutfitStudioFrame::OnPhysicsProbeZSlider)
+	EVT_COMMAND_SCROLL(XRCID("physicsProbeSize"), OutfitStudioFrame::OnPhysicsProbeSizeSlider)
+	EVT_TEXT(XRCID("physicsProbeXText"), OutfitStudioFrame::OnPhysicsProbeXText)
+	EVT_TEXT(XRCID("physicsProbeYText"), OutfitStudioFrame::OnPhysicsProbeYText)
+	EVT_TEXT(XRCID("physicsProbeZText"), OutfitStudioFrame::OnPhysicsProbeZText)
+	EVT_TEXT(XRCID("physicsProbeSizeText"), OutfitStudioFrame::OnPhysicsProbeSizeText)
+	EVT_COMMAND_SCROLL(XRCID("physicsWindSlider"), OutfitStudioFrame::OnPhysicsWindSlider)
+	EVT_CHOICE(XRCID("physicsWindDir"), OutfitStudioFrame::OnPhysicsWindDir)
+	EVT_TIMER(PHYSICS_TIMER, OutfitStudioFrame::OnPhysicsTimer)
 
 	EVT_COMBOBOX(XRCID("cPoseName"), OutfitStudioFrame::OnSelectPose)
 	EVT_BUTTON(XRCID("savePose"), OutfitStudioFrame::OnSavePose)
 	EVT_BUTTON(XRCID("deletePose"), OutfitStudioFrame::OnDeletePose)
 	EVT_BUTTON(XRCID("exportPoseFile"), OutfitStudioFrame::OnSaveHkxPose)
 	EVT_BUTTON(XRCID("importPoseFile"), OutfitStudioFrame::OnLoadHkxPose)
+
+	EVT_COMBOBOX(XRCID("cAnimationName"), OutfitStudioFrame::OnSelectAnimation)
+	EVT_BUTTON(XRCID("importAnimationFile"), OutfitStudioFrame::OnLoadHkxAnimation)
+	EVT_BUTTON(XRCID("animFavorite"), OutfitStudioFrame::OnAnimationFavorite)
+	EVT_BUTTON(XRCID("animPlayPause"), OutfitStudioFrame::OnAnimPlayPause)
+	EVT_COMMAND_SCROLL(XRCID("animFrameSlider"), OutfitStudioFrame::OnAnimFrameSlider)
+	EVT_CHOICE(XRCID("animSpeed"), OutfitStudioFrame::OnAnimSpeedChanged)
+	EVT_CHECKBOX(XRCID("animInterpolate"), OutfitStudioFrame::OnAnimInterpolateChanged)
+	EVT_TIMER(ANIM_PLAYBACK_TIMER, OutfitStudioFrame::OnAnimPlaybackTimer)
 
 	EVT_CHECKBOX(XRCID("selectSliders"), OutfitStudioFrame::OnSelectSliders)
 	EVT_TEXT_ENTER(XRCID("sliderFilter"), OutfitStudioFrame::OnSliderFilterChanged)
@@ -337,6 +399,7 @@ wxBEGIN_EVENT_TABLE(OutfitStudioFrame, wxFrame)
 	EVT_MENU(XRCID("deleteBoneSelected"), OutfitStudioFrame::OnDeleteBoneFromSelected)
 	EVT_MENU(XRCID("editBone"), OutfitStudioFrame::OnEditBone)
 	EVT_MENU(XRCID("copyBoneWeight"), OutfitStudioFrame::OnCopyBoneWeight)
+	EVT_MENU(XRCID("copySelectedWeight"), OutfitStudioFrame::OnCopySelectedWeight)
 	EVT_MENU(XRCID("transferSelectedWeight"), OutfitStudioFrame::OnTransferSelectedWeight)
 	EVT_MENU(XRCID("maskWeightedVerts"), OutfitStudioFrame::OnMaskWeighted)
 	EVT_MENU(XRCID("checkBadBones"), OutfitStudioFrame::OnCheckBadBones)
@@ -413,6 +476,8 @@ wxBEGIN_EVENT_TABLE(OutfitStudioFrame, wxFrame)
 	EVT_SLIDER(XRCID("lightDirectional1Slider"), OutfitStudioFrame::OnUpdateLights)
 	EVT_SLIDER(XRCID("lightDirectional2Slider"), OutfitStudioFrame::OnUpdateLights)
 	EVT_BUTTON(XRCID("lightReset"), OutfitStudioFrame::OnResetLights)
+	EVT_BUTTON(XRCID("lightSave"), OutfitStudioFrame::OnSaveLights)
+	EVT_CHOICE(XRCID("hdriBackground"), OutfitStudioFrame::OnHDRiBackground)
 
 	EVT_MENU(XRCID("btnDiscord"), OutfitStudioFrame::OnDiscord)
 	EVT_MENU(XRCID("btnGitHub"), OutfitStudioFrame::OnGitHub)
@@ -893,20 +958,22 @@ bool OutfitStudio::SetDefaultConfig() {
 	Config.SetDefaultBoolValue("Input/LeftMousePan", false);
 	Config.SetDefaultBoolValue("Input/BrushSettingsNearCursor", true);
 	Config.SetDefaultBoolValue("Input/MaskHistory", true);
-	Config.SetDefaultValue("Lights/Ambient", 20);
-	Config.SetDefaultValue("Lights/Frontal", 20);
-	Config.SetDefaultValue("Lights/Directional0", 60);
+	Config.SetDefaultBoolValue("Input/ShapeHoverHighlight", true);
+	Config.SetDefaultValue("Lights/Ambient", 15);
+	Config.SetDefaultValue("Lights/Frontal", 100);
+	Config.SetDefaultValue("Lights/Directional0", 0);
 	Config.SetDefaultValue("Lights/Directional0.x", -90);
 	Config.SetDefaultValue("Lights/Directional0.y", 10);
 	Config.SetDefaultValue("Lights/Directional0.z", 100);
-	Config.SetDefaultValue("Lights/Directional1", 60);
+	Config.SetDefaultValue("Lights/Directional1", 0);
 	Config.SetDefaultValue("Lights/Directional1.x", 70);
 	Config.SetDefaultValue("Lights/Directional1.y", 10);
 	Config.SetDefaultValue("Lights/Directional1.z", 100);
-	Config.SetDefaultValue("Lights/Directional2", 85);
+	Config.SetDefaultValue("Lights/Directional2", 0);
 	Config.SetDefaultValue("Lights/Directional2.x", 30);
 	Config.SetDefaultValue("Lights/Directional2.y", 20);
 	Config.SetDefaultValue("Lights/Directional2.z", -100);
+	Config.SetDefaultValue("Rendering/HDRIBackground", "");
 	const wxSize outfitStudioFrameSize = wxWindow::FromDIP(wxSize(1360, 900), nullptr);
 	OutfitStudioConfig.SetDefaultValue("OutfitStudioFrame.width", outfitStudioFrameSize.GetWidth());
 	OutfitStudioConfig.SetDefaultValue("OutfitStudioFrame.height", outfitStudioFrameSize.GetHeight());
@@ -1324,8 +1391,11 @@ OutfitStudioFrame::OutfitStudioFrame(const wxPoint& pos, const wxSize& size) {
 	segmentTabButton = (wxStateButton*)FindWindowByName("segmentTabButton");
 	partitionTabButton = (wxStateButton*)FindWindowByName("partitionTabButton");
 	lightsTabButton = (wxStateButton*)FindWindowByName("lightsTabButton");
+	toolScroll = dynamic_cast<wxScrolledWindow*>(FindWindowByName("toolScroll"));
 	masksPane = dynamic_cast<wxCollapsiblePane*>(FindWindowByName("masksPane"));
 	posePane = dynamic_cast<wxCollapsiblePane*>(FindWindowByName("posePane"));
+	physicsPane = dynamic_cast<wxCollapsiblePane*>(FindWindowByName("physicsPane"));
+	animationPane = dynamic_cast<wxCollapsiblePane*>(FindWindowByName("animationPane"));
 	notesPane = dynamic_cast<wxCollapsiblePane*>(FindWindowByName("notesPane"));
 	projectNotes = (wxTextCtrl*)FindWindowByName("projectNotes");
 
@@ -1439,11 +1509,18 @@ OutfitStudioFrame::OutfitStudioFrame(const wxPoint& pos, const wxSize& size) {
 
 		auto lightDirectional2Slider = (wxSlider*)lightSettings->FindWindowByName("lightDirectional2Slider");
 		lightDirectional2Slider->SetValue(directional2);
+
+		hdriBackground = (wxChoice*)lightSettings->FindWindowByName("hdriBackground");
+		PopulateHDRiBackgrounds();
 	}
 
 	auto editPanel = (wxPanel*)FindWindowByName("editPanel");
 	if (editPanel)
 		editPanel->SetBackgroundColour(wxColour(112, 112, 112));
+
+	// Dragging the splitter sash changes how much of the tool area fits.
+	if (wxWindow* bottomSplitPanel = FindWindowByName("bottomSplitPanel"))
+		bottomSplitPanel->Bind(wxEVT_SIZE, &OutfitStudioFrame::OnBottomPanelResize, this);
 
 	cXMirrorBone = (wxChoice*)FindWindowByName("cXMirrorBone");
 	cPoseBone = (wxChoice*)FindWindowByName("cPoseBone");
@@ -1468,7 +1545,41 @@ OutfitStudioFrame::OutfitStudioFrame(const wxPoint& pos, const wxSize& size) {
 	tzPoseText = (wxTextCtrl*)FindWindowByName("tzPoseText");
 	scPoseText = (wxTextCtrl*)FindWindowByName("scPoseText");
 	cbPose = (wxCheckBox*)FindWindowByName("cbPose");
+	cbPhysics = (wxCheckBox*)FindWindowByName("cbPhysics");
+	cbPhysicsVis = (wxCheckBox*)FindWindowByName("cbPhysicsVis");
+	cbPhysicsGrab = (wxCheckBox*)FindWindowByName("cbPhysicsGrab");
+	cbPhysicsProbe = (wxCheckBox*)FindWindowByName("cbPhysicsProbe");
+	physicsProbePanel = (wxPanel*)FindWindowByName("physicsProbePanel");
+	physicsProbeX = (wxSlider*)FindWindowByName("physicsProbeX");
+	physicsProbeY = (wxSlider*)FindWindowByName("physicsProbeY");
+	physicsProbeZ = (wxSlider*)FindWindowByName("physicsProbeZ");
+	physicsProbeSize = (wxSlider*)FindWindowByName("physicsProbeSize");
+	physicsProbeXText = (wxTextCtrl*)FindWindowByName("physicsProbeXText");
+	physicsProbeYText = (wxTextCtrl*)FindWindowByName("physicsProbeYText");
+	physicsProbeZText = (wxTextCtrl*)FindWindowByName("physicsProbeZText");
+	physicsProbeSizeText = (wxTextCtrl*)FindWindowByName("physicsProbeSizeText");
+	physicsWindSlider = (wxSlider*)FindWindowByName("physicsWindSlider");
+	physicsWindDir = (wxChoice*)FindWindowByName("physicsWindDir");
 	poseToMesh = (wxButton*)FindWindowByName("poseToMesh");
+
+	// Nothing is loaded yet, and only meshes that reference a physics XML can be
+	// simulated: UpdatePhysicsControlsVisibility reveals the pane again when one
+	// shows up. In a build without Bullet that never happens.
+	if (physicsPane)
+		physicsPane->Hide();
+
+	cAnimationName = (wxComboBox*)FindWindowByName("cAnimationName");
+	animFavoriteButton = (wxButton*)FindWindowByName("animFavorite");
+	animPlayPauseButton = (wxButton*)FindWindowByName("animPlayPause");
+	animFrameSlider = (wxSlider*)FindWindowByName("animFrameSlider");
+	animFrameText = dynamic_cast<wxStaticText*>(FindWindowByName("animFrameText"));
+	animSpeedChoice = (wxChoice*)FindWindowByName("animSpeed");
+	animInterpolateCheck = (wxCheckBox*)FindWindowByName("animInterpolate");
+
+	ResetAnimationList();
+
+	animPlaybackTimer.SetOwner(this, ANIM_PLAYBACK_TIMER);
+	physicsTimer.SetOwner(this, PHYSICS_TIMER);
 
 	wxWindow* leftPanel = FindWindowByName("leftSplitPanel");
 	if (leftPanel) {
@@ -1576,6 +1687,8 @@ void OutfitStudioFrame::OnExit(wxCommandEvent& WXUNUSED(event)) {
 }
 
 void OutfitStudioFrame::OnClose(wxCloseEvent& WXUNUSED(event)) {
+	PauseAnimationPlayback();
+
 	if (!CheckPendingChanges())
 		return;
 
@@ -1583,6 +1696,7 @@ void OutfitStudioFrame::OnClose(wxCloseEvent& WXUNUSED(event)) {
 		editUV->Close();
 
 	if (project) {
+		ShutdownPhysics();
 		delete project;
 		project = nullptr;
 	}
@@ -2252,6 +2366,7 @@ void OutfitStudioFrame::OnSettings(wxCommandEvent& WXUNUSED(event)) {
 		wxString gameDataPath = wxString::FromUTF8(Config["GameDataPath"]);
 
 		XRCCTRL(*settings, "cbPreviewAlwaysDetached", wxCheckBox)->Hide();
+		XRCCTRL(*settings, "cbPreviewOnLeft", wxCheckBox)->Hide();
 
 		wxChoice* choiceSingleInstanceBehavior = XRCCTRL(*settings, "choiceSingleInstanceBehavior", wxChoice);
 		choiceSingleInstanceBehavior->SetSelection(OutfitStudioConfig.GetIntValue("SingleInstanceBehavior", 0));
@@ -2291,6 +2406,22 @@ void OutfitStudioFrame::OnSettings(wxCommandEvent& WXUNUSED(event)) {
 
 				wxColour colorPointsMasked = commonControls.cpColorPointsMasked->GetColour();
 				glView->gls.SetMaskedPointColor(Vector3(colorPointsMasked.Red() / 255.0f, colorPointsMasked.Green() / 255.0f, colorPointsMasked.Blue() / 255.0f));
+
+				if (!Config.GetBoolValue("Input/ShapeHoverHighlight"))
+					glView->ClearHoverHighlight();
+
+				// Only feeds a uniform, so the meshes and their textures stay as they are
+				glView->gls.SetComplexMaterialEnabled(OutfitStudioConfig.GetBoolValue("Rendering/ComplexMaterial", true));
+
+				// True PBR picks a different pair of shader files rather than feeding a uniform, so the
+				// shapes have to go back through their material assignment for a change here to show.
+				const bool pbrEnabled = OutfitStudioConfig.GetBoolValue("Rendering/TruePBR", true);
+				if (pbrEnabled != glView->gls.IsPBREnabled()) {
+					glView->gls.SetPBREnabled(pbrEnabled);
+					MeshesFromProj();
+				}
+
+				glView->Render();
 			}
 
 			Config.SaveConfig(Config["AppDir"] + "/Config.xml");
@@ -2701,6 +2832,7 @@ bool OutfitStudioFrame::LoadProject(const std::string& fileName,
 		bEditSlider = false;
 		MenuExitSliderEdit();
 
+		ShutdownPhysics();
 		delete project;
 		project = new OutfitProject(this);
 	}
@@ -2766,9 +2898,7 @@ bool OutfitStudioFrame::LoadProject(const std::string& fileName,
 		projectNotes->SetValue(notesText);
 		notesPane->Collapse(notesText.empty());
 
-		wxWindow* parentPanel = FindWindowByName("bottomSplitPanel");
-		if (parentPanel)
-			parentPanel->Layout();
+		UpdateToolScrollLayout();
 	}
 
 	UpdateTitle();
@@ -2924,6 +3054,8 @@ void OutfitStudioFrame::ApplySliders(bool recalcBVH) {
 		project->GetLiveVerts(shape, verts, &uvs);
 		glView->UpdateMeshVertices(shape->name.get(), &verts, recalcBVH, true, false, &uvs);
 	}
+
+	UpdatePhysicsShapes();
 
 	bool tMode = glView->GetTransformMode();
 
@@ -4107,6 +4239,7 @@ void OutfitStudioFrame::OnNewProject(wxCommandEvent& WXUNUSED(event)) {
 	bEditSlider = false;
 	MenuExitSliderEdit();
 
+	ShutdownPhysics();
 	delete project;
 	project = new OutfitProject(this);
 
@@ -4465,6 +4598,7 @@ void OutfitStudioFrame::OnUnloadProject(wxCommandEvent& WXUNUSED(event)) {
 
 	ResetProject();
 
+	ShutdownPhysics();
 	delete project;
 	project = new OutfitProject(this);
 
@@ -4546,13 +4680,13 @@ void OutfitStudioFrame::ClearProject() {
 	cPoseName->Append("<New>", (void*)nullptr);
 	cPoseName->SetStringSelection("<New>");
 
+	ResetAnimationList();
+
 	if (projectNotes && notesPane) {
 		projectNotes->Clear();
 		notesPane->Collapse();
 
-		wxWindow* parentPanel = FindWindowByName("bottomSplitPanel");
-		if (parentPanel)
-			parentPanel->Layout();
+		UpdateToolScrollLayout();
 	}
 
 	project->outfitName.clear();
@@ -4778,36 +4912,15 @@ void OutfitStudioFrame::UpdateAnimationGUI() {
 	//   Skyrim SE/VR: Data\SAM\Poses\*.yaml
 	//   Fallout 4/VR: Data\F4SE\Plugins\SAF\Poses\*.json
 	const TargetGame samGame = wxGetApp().targetGame;
-	wxString samRelDir;
-	bool samUsesJson = false;
 	switch (samGame) {
 	case SKYRIMSE:
 	case SKYRIMVR:
-		samRelDir = wxString("SAM") + PathSepChar + "Poses";
-		break;
 	case FO4:
 	case FO4VR:
-		samRelDir = wxString("F4SE") + PathSepChar + "Plugins" + PathSepChar + "SAF" + PathSepChar + "Poses";
-		samUsesJson = true;
+		poseDataCollection.LoadGamePoses(GameUtil::GetGameDataPath(samGame).ToUTF8().data(), samGame == FO4 || samGame == FO4VR);
 		break;
 	default:
 		break;
-	}
-
-	if (!samRelDir.IsEmpty()) {
-		wxString gameDataPath = GameUtil::GetGameDataPath(samGame);
-		if (!gameDataPath.IsEmpty()) {
-			if (!gameDataPath.EndsWith(PathSepChar))
-				gameDataPath.Append(PathSepChar);
-			wxString samDir = gameDataPath + samRelDir;
-			if (wxDirExists(samDir)) {
-				std::string utf8Dir(samDir.ToUTF8().data());
-				if (samUsesJson)
-					poseDataCollection.LoadJsonData(utf8Dir, "SAM: ");
-				else
-					poseDataCollection.LoadYamlData(utf8Dir, "SAM: ");
-			}
-		}
 	}
 
 	for (auto& poseData : poseDataCollection.poseData) {
@@ -4824,6 +4937,7 @@ void OutfitStudioFrame::UpdateAnimationGUI() {
 
 	RefreshGUIWeightColors();
 	PoseToGUI();
+	UpdatePhysicsControlsVisibility();
 
 	glView->UpdateNodes();
 	glView->UpdateBones();
@@ -4885,6 +4999,10 @@ void OutfitStudioFrame::MeshesFromProj(const bool reloadTextures) {
 
 	for (auto& shape : project->GetWorkNif()->GetShapes())
 		MeshFromProj(shape, reloadTextures);
+
+	// Every mesh has been through SetMeshTextures by now, so whether any of them is a Complex
+	// Material has been decided and the environment can be turned on for them.
+	ApplyAutoHDRiBackground();
 
 	if (glView->GetVertexEdit())
 		glView->ShowVertexEdit();
@@ -5425,13 +5543,6 @@ void OutfitStudioFrame::OnImportTRIHead(wxCommandEvent& WXUNUSED(event)) {
 		wxFileName fileName(fn);
 		wxLogMessage("Importing morphs from TRI (head) file '%s'...", fn);
 
-		TriHeadFile tri;
-		if (!tri.Read(fn.ToUTF8().data())) {
-			wxLogError("Failed to load TRI file '%s'!", fn);
-			wxMessageBox(_("Failed to load TRI file!"), _("Error"), wxICON_ERROR);
-			return;
-		}
-
 		std::string shapeName{fileName.GetName().ToUTF8()};
 		while (project->IsValidShape(shapeName)) {
 			std::string result{wxGetTextFromUser(_("Please enter a new unique name for the shape."), _("Rename Shape"), shapeName, this).ToUTF8()};
@@ -5441,30 +5552,17 @@ void OutfitStudioFrame::OnImportTRIHead(wxCommandEvent& WXUNUSED(event)) {
 			shapeName = std::move(result);
 		}
 
-		auto verts = tri.GetVertices();
-		auto tris = tri.GetTriangles();
-		auto uvs = tri.GetUV();
-		auto shape = project->CreateNifShapeFromData(shapeName, &verts, &tris, &uvs);
-		if (!shape)
+		std::vector<std::string> newSliders;
+		if (!project->ImportHeadTRI(fn.ToUTF8().data(), shapeName, true, &newSliders)) {
+			wxLogError("Failed to load TRI file '%s'!", fn);
+			wxMessageBox(_("Failed to load TRI file!"), _("Error"), wxICON_ERROR);
 			return;
+		}
 
 		RefreshGUIFromProj(false);
 
-		auto morphs = tri.GetMorphs();
-		for (auto& morph : morphs) {
-			if (!project->ValidSlider(morph.morphName)) {
-				project->AddEmptySlider(morph.morphName);
-				createSliderGUI(morph.morphName, sliderScroll, sliderScroll->GetSizer());
-			}
-
-			std::unordered_map<uint16_t, Vector3> diff;
-			diff.reserve(morph.vertices.size());
-
-			for (size_t i = 0; i < morph.vertices.size(); i++)
-				diff[i] = morph.vertices[i];
-
-			project->SetSliderFromDiff(morph.morphName, shape, diff);
-		}
+		for (auto& sliderName : newSliders)
+			createSliderGUI(sliderName, sliderScroll, sliderScroll->GetSizer());
 	}
 
 	sliderScroll->FitInside();
@@ -5968,6 +6066,11 @@ void OutfitStudioFrame::OnShapeTreeMotion(wxMouseEvent& event) {
 
 	if (!outfitShapes || !glView)
 		return;
+
+	if (!Config.GetBoolValue("Input/ShapeHoverHighlight")) {
+		glView->ClearHoverHighlight();
+		return;
+	}
 
 	const wxPoint mousePos = event.GetPosition();
 	int flags = 0;
@@ -7698,11 +7801,11 @@ void OutfitStudioFrame::OnUpdateLights(wxCommandEvent& WXUNUSED(event)) {
 }
 
 void OutfitStudioFrame::OnResetLights(wxCommandEvent& WXUNUSED(event)) {
-	int ambient = 20;
-	int frontal = 20;
-	int directional0 = 60;
-	int directional1 = 60;
-	int directional2 = 85;
+	int ambient = 15;
+	int frontal = 100;
+	int directional0 = 0;
+	int directional1 = 0;
+	int directional2 = 0;
 
 	glView->UpdateLights(ambient, frontal, directional0, directional1, directional2);
 
@@ -7726,6 +7829,125 @@ void OutfitStudioFrame::OnResetLights(wxCommandEvent& WXUNUSED(event)) {
 	Config.SetValue("Lights/Directional0", directional0);
 	Config.SetValue("Lights/Directional1", directional1);
 	Config.SetValue("Lights/Directional2", directional2);
+}
+
+void OutfitStudioFrame::OnSaveLights(wxCommandEvent& event) {
+	// Make sure the current slider values are in the configuration before writing it out
+	OnUpdateLights(event);
+
+	int ret = Config.SaveConfig(Config["AppDir"] + "/Config.xml");
+	if (ret)
+		wxLogWarning("Failed to save configuration (%d)!", ret);
+}
+
+void OutfitStudioFrame::PopulateHDRiBackgrounds() {
+	if (!hdriBackground)
+		return;
+
+	hdriBackground->Clear();
+
+	// Client data carries the file name; an empty one is what turns the environment off.
+	hdriBackground->Append(_("No background"), new wxStringClientData(""));
+
+#ifdef USE_OPENEXR
+	wxArrayString files;
+	wxDir::GetAllFiles(wxString::FromUTF8(Config["AppDir"]) + "/res/hdri", &files, "*.exr", wxDIR_FILES);
+	files.Sort();
+
+	for (auto& file : files) {
+		const wxFileName fileName(file);
+
+		// The name on disk, not a translated one - these are files the user can add to and rename.
+		hdriBackground->Append(fileName.GetName(), new wxStringClientData(fileName.GetFullName()));
+	}
+#else
+	// Nothing can be loaded without an EXR decoder, and a choice with one entry reads as broken.
+	hdriBackground->Hide();
+
+	if (lightSettings) {
+		if (auto label = lightSettings->FindWindowByName("hdriBackgroundLabel"))
+			label->Hide();
+	}
+#endif
+
+	hdriBackground->SetSelection(0);
+}
+
+bool OutfitStudioFrame::SetHDRiBackground(const std::string& fileName, const bool remember) {
+	if (!glView->SetHDRiBackground(fileName) && !fileName.empty()) {
+		// The environment failed to load and was left off, so the choice has to say so too.
+		if (hdriBackground)
+			hdriBackground->SetSelection(0);
+
+		return false;
+	}
+
+	// Only a background the user picked is worth writing down. The automatic one is a convenience
+	// for the project at hand, and remembering it would make the setting say the user chose an HDRi
+	// they never asked for - and would rewrite the config on every project that has a Complex
+	// Material in it.
+	if (remember) {
+		Config.SetValue("Rendering/HDRIBackground", fileName);
+
+		int ret = Config.SaveConfig(Config["AppDir"] + "/Config.xml");
+		if (ret)
+			wxLogWarning("Failed to save configuration (%d)!", ret);
+	}
+
+	if (!hdriBackground)
+		return true;
+
+	for (unsigned int i = 0; i < hdriBackground->GetCount(); i++) {
+		auto data = static_cast<wxStringClientData*>(hdriBackground->GetClientObject(i));
+		if (data && data->GetData().ToStdString() == fileName) {
+			hdriBackground->SetSelection(i);
+			break;
+		}
+	}
+
+	return true;
+}
+
+void OutfitStudioFrame::OnHDRiBackground(wxCommandEvent& WXUNUSED(event)) {
+	if (!hdriBackground)
+		return;
+
+	auto data = static_cast<wxStringClientData*>(hdriBackground->GetClientObject(hdriBackground->GetSelection()));
+	const std::string fileName = data ? data->GetData().ToStdString() : std::string();
+
+	// Turning it off by hand is a decision the automatic activation must not talk the user out of.
+	hdriBackgroundCleared = fileName.empty();
+
+	// Only a background the user asked for is worth interrupting them over. The automatic one below
+	// leaves its reason in the log and moves on.
+	if (!SetHDRiBackground(fileName, true))
+		wxMessageBox(wxString::Format(_("Failed to load the HDRi '%s'. See the log for details."), fileName), _("Error"), wxICON_ERROR, this);
+}
+
+void OutfitStudioFrame::ApplyAutoHDRiBackground() {
+#ifndef USE_OPENEXR
+	// Nothing to activate, and trying would log a failure for every project that has a Complex
+	// Material in it.
+	return;
+#else
+	if (hdriBackgroundCleared || !hdriBackground || glView->HasHDRiBackground())
+		return;
+
+	// Complex Material and True PBR shading both live off what they reflect, so a project full of
+	// either is nearly impossible to judge against the flat background. A True PBR shape has the
+	// stronger claim of the two: its cube map slot is deliberately empty, so without an HDRi there is
+	// no image based lighting for it at all. Anything else is left as it was.
+	const auto& meshes = glView->gls.GetMeshes();
+	if (std::none_of(meshes.begin(), meshes.end(), [](const Mesh* m) { return m->complexMaterial || m->pbr; }))
+		return;
+
+	// Whatever the user last picked by hand, which is the only thing that ever gets written there.
+	std::string fileName = Config["Rendering/HDRIBackground"];
+	if (fileName.empty() || !PlatformUtil::FileExists(Config["AppDir"] + "/res/hdri/" + fileName))
+		fileName = "sunrise.exr";
+
+	SetHDRiBackground(fileName, false);
+#endif
 }
 
 void OutfitStudioFrame::OnClickSliderButton(wxCommandEvent& event) {
@@ -7989,10 +8211,15 @@ void OutfitStudioFrame::OnTabButtonClick(wxCommandEvent& event) {
 		cbNormalizeWeights->Show(false);
 		xMirrorBoneLabel->Show(false);
 		posePane->Show(false);
+		if (physicsPane)
+			physicsPane->Show(false);
+		if (animationPane)
+			animationPane->Show(false);
 		bonesFilter->GetParent()->Show(false);
 
 		if (project->bPose) {
 			project->bPose = false;
+			UpdatePhysicsState();
 			ApplyPose();
 		}
 
@@ -8092,6 +8319,10 @@ void OutfitStudioFrame::OnTabButtonClick(wxCommandEvent& event) {
 		cbNormalizeWeights->Show();
 		xMirrorBoneLabel->Show();
 		posePane->Show();
+		if (physicsPane)
+			physicsPane->Show(physicsAvailable);
+		if (animationPane)
+			animationPane->Show();
 		bonesFilter->GetParent()->Show();
 
 		UpdateBoneTransformToolEnabled();
@@ -8374,10 +8605,9 @@ void OutfitStudioFrame::OnTabButtonClick(wxCommandEvent& event) {
 	UpdateBrushSettings();
 
 	wxPanel* topSplitPanel = (wxPanel*)FindWindowByName("topSplitPanel");
-	wxPanel* bottomSplitPanel = (wxPanel*)FindWindowByName("bottomSplitPanel");
-
 	topSplitPanel->Layout();
-	bottomSplitPanel->Layout();
+
+	UpdateToolScrollLayout();
 
 	Refresh();
 }
@@ -8600,9 +8830,17 @@ void OutfitStudioFrame::OnLoadPreset(wxCommandEvent& WXUNUSED(event)) {
 			else
 				r = presets.GetSmallPreset(choice, project->GetSliderName(i), v);
 
-			// Sliders without a value in the preset fall back to their default for the chosen weight
-			if (!r)
+			if (!r) {
+				// Zaps without a value in the preset are cleared so they don't show up as protruding shapes
+				if (project->SliderZap(i)) {
+					SetSliderValue(i, 0);
+					continue;
+				}
+
+				// Sliders without a value in the preset fall back to their default for the chosen weight
 				v = project->SliderDefault(i, hi) / 100.0f;
+			}
+
 			if (project->SliderInvert(i))
 				v = 1.0f - v;
 
@@ -11236,7 +11474,7 @@ MergeCheckErrors OutfitStudioFrame::CheckCopyGeo(wxDialog& dlg) {
 	MergeCheckErrors e;
 	project->CheckMerge(source, target, e);
 	XRCCTRL(dlg, "wxID_OK", wxButton)->Enable(e.canMerge);
-	const bool hasWarnings = e.partitionsMismatch || e.segmentsMismatch || e.textureMismatch;
+	const bool hasWarnings = e.partitionsMismatch || e.segmentsMismatch || e.textureMismatch || e.transformsMismatch;
 
 	if (e.canMerge && !hasWarnings) {
 		errors->SetLabel(_("No errors found!"));
@@ -11263,6 +11501,8 @@ MergeCheckErrors OutfitStudioFrame::CheckCopyGeo(wxDialog& dlg) {
 		warningLines << "\n- " << _("Segments do not match. Merge will auto-reconcile matching IDs and create missing segments/sub segments.");
 	if (e.textureMismatch)
 		warningLines << "\n- " << _("Base texture doesn't match. Merge will use texture paths from the target shape.");
+	if (e.transformsMismatch)
+		warningLines << "\n- " << _("Transforms do not match. Merge will apply the transforms of both shapes to their geometry and clear them, without moving the meshes.");
 
 	wxString msg;
 	if (!errorLines.empty())
@@ -12018,12 +12258,30 @@ void OutfitStudioFrame::CalcCopySkinTransOption(WeightCopyOptions& options) {
 }
 
 void OutfitStudioFrame::OnCopyBoneWeight(wxCommandEvent& WXUNUSED(event)) {
+	CopyWeightsToSelectedShapes(false);
+}
+
+void OutfitStudioFrame::OnCopySelectedWeight(wxCommandEvent& WXUNUSED(event)) {
+	CopyWeightsToSelectedShapes(true);
+}
+
+void OutfitStudioFrame::CopyWeightsToSelectedShapes(bool selectedBonesOnly) {
 	if (!ShapeSelectionCheck())
 		return;
 
 	if (!project->GetBaseShape()) {
 		wxMessageBox(_("There is no reference shape!"), _("Error"));
 		return;
+	}
+
+	// Bones selected in the bone list are checked in the dialog, all bones otherwise
+	std::vector<std::string> preselectedBones;
+	if (selectedBonesOnly) {
+		preselectedBones = GetSelectedBones();
+		if (preselectedBones.empty()) {
+			wxMessageBox(_("There are no bones selected!"), _("Error"));
+			return;
+		}
 	}
 
 	std::vector<NiShape*> selectedShapes;
@@ -12033,16 +12291,17 @@ void OutfitStudioFrame::OnCopyBoneWeight(wxCommandEvent& WXUNUSED(event)) {
 		else
 			wxMessageBox(_("Sorry, you can't copy weights from the reference shape to itself. Skipping this shape."), _("Can't copy weights"), wxICON_WARNING);
 	}
-	CopyBoneWeightForShapes(selectedShapes);
+	CopyBoneWeightForShapes(selectedShapes, false, preselectedBones);
 }
 
-int OutfitStudioFrame::CopyBoneWeightForShapes(std::vector<NiShape*> shapes, bool silent) {
+int OutfitStudioFrame::CopyBoneWeightForShapes(std::vector<NiShape*> shapes, bool silent, const std::vector<std::string>& preselectedBones) {
 	if (shapes.empty())
 		return 0;
 
 	CloseBrushSettings();
 
 	WeightCopyOptions options;
+	options.preselectedBones = preselectedBones;
 	CalcCopySkinTransOption(options);
 	AnimInfo& workAnim = *project->GetWorkAnim();
 
@@ -13106,17 +13365,69 @@ void OutfitStudioFrame::OnImportMask(wxCommandEvent& WXUNUSED(event)) {
 }
 
 void OutfitStudioFrame::OnPaneCollapse(wxCollapsiblePaneEvent& WXUNUSED(event)) {
-	wxWindow* parentPanel = FindWindowByName("bottomSplitPanel");
-	parentPanel->Layout();
+	UpdateToolScrollLayout();
+}
+
+void OutfitStudioFrame::OnBottomPanelResize(wxSizeEvent& event) {
+	event.Skip();
+	UpdateToolScrollLayout();
+}
+
+void OutfitStudioFrame::UpdateToolScrollLayout() {
+	wxWindow* container = FindWindowByName("bottomSplitPanel");
+	if (!container)
+		return;
+
+	wxSizer* contentSizer = toolScroll ? toolScroll->GetSizer() : nullptr;
+	if (contentSizer) {
+		// The panes stack up taller than the panel once a few of them are open.
+		// Letting the tool area claim its full height would squeeze the slider
+		// list to nothing and cut off whatever no longer fits, so cap it here
+		// and let the rest scroll.
+		int reserved = FromDIP(120);
+		if (notesPane && notesPane->IsShown())
+			reserved += notesPane->GetEffectiveMinSize().GetHeight();
+
+		const int room = std::max(container->GetClientSize().GetHeight() - reserved, FromDIP(80));
+		const int height = std::min(contentSizer->CalcMin().GetHeight(), room);
+
+		if (toolScroll->GetMinHeight() != height)
+			toolScroll->SetMinSize(wxSize(-1, height));
+	}
+
+	container->Layout();
+
+	// Scrollbars follow the virtual size, which the capped minimum above does
+	// not change.
+	if (toolScroll)
+		toolScroll->FitInside();
 }
 
 void OutfitStudioFrame::ApplyPose() {
+	// While an animation plays there is no separate physics pump; the
+	// simulation advances in lockstep with each displayed frame, using the
+	// wall-clock time since the last step.
+	if (physicsRunning && animPlaying)
+		physics->Step(physicsClock.TakeElapsed());
+
+	// Asking for a BVH update queues the shape with wxGLPanel::OnIdle, which
+	// rebuilds a whole AABB tree over every triangle of it - far too expensive
+	// to pay once per displayed animation frame. The tree only serves picking
+	// and brush hit tests, both locked out during playback, so the rebuild is
+	// deferred to the single ApplyPose that PauseAnimationPlayback does.
+	const bool updateBVH = !animPlaying && !physicsPumpActive;
+
 	for (auto& shape : project->GetWorkNif()->GetShapes()) {
 		std::vector<Vector3> verts;
 		project->GetLiveVerts(shape, verts);
-		glView->UpdateMeshVertices(shape->name.get(), &verts, true, true, false);
+		glView->UpdateMeshVertices(shape->name.get(), &verts, updateBVH, true, false);
 	}
-	glView->UpdateBones();
+
+	// Bone overlays cost one GL mesh created and destroyed per bone, not worth
+	// paying for every frame while they are not being drawn.
+	if (!animPlaying || glView->GetBonesMode() || glView->GetNodesMode())
+		glView->UpdateBones();
+
 	glView->Render();
 }
 
@@ -13359,6 +13670,7 @@ void OutfitStudioFrame::ActivatePose(bool checked) {
 	project->bPose = checked;
 	poseToMesh->Enable(checked);
 
+	UpdatePhysicsState();
 	ApplyPose();
 }
 
@@ -13367,6 +13679,14 @@ void OutfitStudioFrame::OnPoseCheckBox(wxCommandEvent& e) {
 }
 
 void OutfitStudioFrame::OnSelectPose(wxCommandEvent& WXUNUSED(event)) {
+	// Selecting a pose takes over the skeleton from any selected animation.
+	if (GetSelectedAnimation()) {
+		PauseAnimationPlayback();
+		animCurrentFrame = 0;
+		cAnimationName->SetSelection(0); // "<None>"
+		UpdateAnimationPlayerUI();
+	}
+
 	wxComboBox* cPoseName = (wxComboBox*)FindWindowByName("cPoseName");
 	int poseSel = cPoseName->GetSelection();
 	if (poseSel != wxNOT_FOUND) {
@@ -13638,41 +13958,8 @@ void OutfitStudioFrame::OnLoadHkxPose(wxCommandEvent& WXUNUSED(event)) {
 	std::string skeletonHkxPath;
 
 	if (format == PoseFileFormat::Hkx) {
-		TargetGame targetGame = wxGetApp().targetGame;
-		if (!GetPoseHkxFormat(targetGame)) {
-			wxMessageBox(_("Loading HKX poses is currently only supported for Skyrim Legendary Edition, Skyrim Special Edition, Skyrim VR, Fallout 4 and Fallout 4 VR."),
-						 _("Load Pose File"),
-						 wxOK | wxICON_INFORMATION,
-						 this);
+		if (!GetReferenceSkeletonHkxPath(skeletonHkxPath, _("Load Pose File")))
 			return;
-		}
-
-		wxString defSkelNif = wxString::FromUTF8(Config["Anim/DefaultSkeletonReference"]);
-		if (defSkelNif.IsEmpty()) {
-			wxMessageBox(_("No reference skeleton is configured. Please set a reference skeleton in the application settings before loading an HKX pose."),
-						 _("Load Pose File"),
-						 wxOK | wxICON_ERROR,
-						 this);
-			return;
-		}
-
-		wxFileName defSkelFn(defSkelNif);
-		if (defSkelFn.IsRelative())
-			defSkelFn = wxFileName(wxString::FromUTF8(Config["AppDir"]) + PathSepChar + defSkelNif);
-		defSkelFn.SetExt("hkx");
-
-		wxString skelHkx = defSkelFn.GetFullPath();
-		if (!wxFileExists(skelHkx)) {
-			wxMessageBox(wxString::Format(_("No Havok skeleton file was found next to the configured reference skeleton.\n\nExpected file:\n%s\n\nTo load HKX poses, place a matching .hkx skeleton file alongside the .nif reference skeleton."),
-							  skelHkx),
-						 _("Load Pose File"),
-						 wxOK | wxICON_ERROR,
-						 this);
-			return;
-		}
-
-
-		skeletonHkxPath = std::string(skelHkx.ToUTF8().data());
 	}
 	else if (format != PoseFileFormat::Json && format != PoseFileFormat::Yaml) {
 		wxMessageBox(_("Please choose a pose file with a .hkx, .json, .yaml or .yml extension."), _("Load Pose File"), wxOK | wxICON_ERROR, this);
@@ -13728,6 +14015,942 @@ void OutfitStudioFrame::OnLoadHkxPose(wxCommandEvent& WXUNUSED(event)) {
 	OnSelectPose(dummy);
 	if (statusBar)
 		statusBar->SetStatusText(_("Pose file loaded."), 0);
+}
+
+bool OutfitStudioFrame::GetReferenceSkeletonHkxPath(std::string& outPath, const wxString& caption) {
+	if (!GetPoseHkxFormat(wxGetApp().targetGame, nullptr)) {
+		wxMessageBox(_("HKX support is currently only available for Skyrim Legendary Edition, Skyrim Special Edition, Skyrim VR, Fallout 4 and Fallout 4 VR."),
+					 caption,
+					 wxOK | wxICON_INFORMATION,
+					 this);
+		return false;
+	}
+
+	wxString error;
+	if (PoseDataCollection::FindReferenceSkeletonHkx(outPath, error))
+		return true;
+
+	wxMessageBox(error, caption, wxOK | wxICON_ERROR, this);
+	return false;
+}
+
+AnimationData* OutfitStudioFrame::GetSelectedAnimation() {
+	if (!cAnimationName)
+		return nullptr;
+
+	int sel = cAnimationName->GetSelection();
+	if (sel == wxNOT_FOUND)
+		return nullptr;
+
+	// The "<None>" sentinel entry has null client data.
+	return reinterpret_cast<AnimationData*>(cAnimationName->GetClientData(sel));
+}
+
+double OutfitStudioFrame::GetAnimPlaybackSpeed() {
+	// Indices match the "animSpeed" choice contents in the XRC.
+	static const double speeds[] = {0.25, 0.5, 1.0, 1.5, 2.0};
+	constexpr int defaultSel = 2; // 1x
+
+	int sel = animSpeedChoice ? animSpeedChoice->GetSelection() : defaultSel;
+	if (sel < 0 || sel >= static_cast<int>(std::size(speeds)))
+		sel = defaultSel;
+
+	return speeds[sel];
+}
+
+bool OutfitStudioFrame::IsAnimationInterpolated() const {
+	return animInterpolateCheck && animInterpolateCheck->GetValue();
+}
+
+void OutfitStudioFrame::ApplyAnimationFrame(double framePos, bool updatePoseGUI) {
+	AnimationData* anim = GetSelectedAnimation();
+	if (!anim || anim->framePoses.empty())
+		return;
+
+	const size_t numFrames = anim->framePoses.size();
+	if (!(framePos >= 0.0) || framePos > double(numFrames))
+		framePos = 0.0;
+
+	animCurrentFrame = framePos;
+
+	const size_t frame = std::min(size_t(framePos), numFrames - 1);
+	const float blend = float(framePos - double(frame));
+
+	if (IsAnimationInterpolated() && numFrames > 1 && blend > 0.0f) {
+		// Playback loops, so the last frame blends back into the first one.
+		const size_t nextFrame = (frame + 1) % numFrames;
+		PoseData::Interpolate(anim->framePoses[frame], anim->framePoses[nextFrame], blend, animBlendPose);
+		animBlendPose.ApplyToSkeleton();
+	}
+	else {
+		anim->framePoses[frame].ApplyToSkeleton();
+	}
+
+	// Updating the pose sliders is skipped during playback; they are synced
+	// once when playback pauses.
+	if (updatePoseGUI)
+		PoseToGUI();
+
+	if (!project->bPose)
+		ActivatePose(true);
+	else
+		ApplyPose();
+
+	if (animFrameSlider && animFrameSlider->GetValue() != static_cast<int>(frame))
+		animFrameSlider->SetValue(static_cast<int>(frame));
+
+	if (animFrameText)
+		animFrameText->SetLabel(wxString::Format("%lu / %lu", static_cast<unsigned long>(frame + 1), static_cast<unsigned long>(numFrames)));
+}
+
+void OutfitStudioFrame::UpdateAnimationPlayerUI() {
+	AnimationData* anim = GetSelectedAnimation();
+	size_t numFrames = anim ? anim->GetNumFrames() : 0;
+
+	if (animFavoriteButton) {
+		const bool favorite = anim && poseDataCollection.IsFavoriteAnimation(*anim);
+		animFavoriteButton->SetBitmap(wxBitmap(wxString::FromUTF8(Config["AppDir"] + (favorite ? FavoriteStarIcon : FavoriteStarEmptyIcon)), wxBITMAP_TYPE_PNG));
+		animFavoriteButton->Enable(anim != nullptr);
+	}
+
+	if (animPlayPauseButton) {
+		animPlayPauseButton->Enable(numFrames > 0);
+		animPlayPauseButton->SetLabel(animPlaying ? _("Pause") : _("Play"));
+	}
+
+	const size_t currentFrame = numFrames > 0 ? std::min(static_cast<size_t>(animCurrentFrame), numFrames - 1) : 0;
+
+	if (animFrameSlider) {
+		animFrameSlider->Enable(numFrames > 1);
+		animFrameSlider->SetRange(0, numFrames > 1 ? static_cast<int>(numFrames) - 1 : 1);
+		animFrameSlider->SetValue(static_cast<int>(currentFrame));
+	}
+
+	if (animSpeedChoice)
+		animSpeedChoice->Enable(numFrames > 0);
+
+	if (animInterpolateCheck)
+		animInterpolateCheck->Enable(numFrames > 1);
+
+	if (animFrameText) {
+		if (numFrames > 0)
+			animFrameText->SetLabel(wxString::Format("%lu / %lu", static_cast<unsigned long>(currentFrame + 1), static_cast<unsigned long>(numFrames)));
+		else
+			animFrameText->SetLabel("0 / 0");
+	}
+}
+
+int OutfitStudioFrame::GetAnimTargetFps() {
+	int refresh = 0;
+
+	const int displayIndex = wxDisplay::GetFromWindow(this);
+	if (displayIndex != wxNOT_FOUND) {
+		wxVideoMode mode = wxDisplay(static_cast<unsigned int>(displayIndex)).GetCurrentMode();
+		refresh = mode.refresh;
+	}
+
+	if (refresh <= 0)
+		refresh = 60;
+
+	return std::min(refresh, 120);
+}
+
+wxLongLong OutfitStudioFrame::GetAnimFrameDueInMicro() {
+	const wxLongLong period = 1000000 / std::max(animTargetFps, 1);
+	const wxLongLong elapsed = animPlaybackWatch.TimeInMicro() - animLastDrawMicro;
+	return elapsed >= period ? wxLongLong(0) : period - elapsed;
+}
+
+void OutfitStudioFrame::RestartAnimationClock() {
+	animClockBaseFrame = animCurrentFrame;
+	animPlaybackWatch.Start();
+	animLastDrawMicro = 0;
+}
+
+void OutfitStudioFrame::PumpAnimationPlayback() {
+	if (!animPlaying)
+		return;
+
+	AnimationData* anim = GetSelectedAnimation();
+	if (!anim || anim->framePoses.empty()) {
+		PauseAnimationPlayback();
+		return;
+	}
+
+	// Ticks arrive from idle, the timer and mouse motion at wildly different
+	// rates, so the drawing rate is decided here rather than by whatever woke us.
+	if (GetAnimFrameDueInMicro() > 0)
+		return;
+
+	animLastDrawMicro = animPlaybackWatch.TimeInMicro();
+
+	const size_t numFrames = anim->framePoses.size();
+	const double frameDuration = anim->frameDuration > 0.0f ? anim->frameDuration : 1.0f / 30.0f;
+
+	// Where the animation is due, from elapsed time rather than a tick count,
+	// so a late or dropped tick shifts nothing but the smoothness.
+	double framePos = animClockBaseFrame + (animPlaybackWatch.TimeInMicro().ToDouble() / 1000000.0) * GetAnimPlaybackSpeed() / frameDuration;
+	framePos = std::fmod(framePos, double(numFrames));
+	if (framePos < 0.0)
+		framePos = 0.0;
+
+	// Without interpolation only whole frames are ever shown, so skip the work
+	// entirely until the position has actually crossed into the next one.
+	if (!IsAnimationInterpolated() && size_t(framePos) == size_t(animCurrentFrame))
+		return;
+
+	ApplyAnimationFrame(framePos, false);
+}
+
+void OutfitStudioFrame::StartAnimationPlayback() {
+	AnimationData* anim = GetSelectedAnimation();
+	if (!anim || anim->framePoses.empty() || animPlaying)
+		return;
+
+	animPlaying = true;
+	SetAnimationPlaybackLock(true);
+	UpdateAnimationPlayerUI();
+
+	// Resolved once here: the window does not move between displays mid-play.
+	animTargetFps = GetAnimTargetFps();
+
+	RestartAnimationClock();
+	SetHighResolutionTimers(true);
+	Bind(wxEVT_IDLE, &OutfitStudioFrame::OnAnimIdle, this);
+	animPlaybackTimer.Start(AnimPlaybackTimerIntervalMS);
+
+	// Physics switches from its own pump to stepping in lockstep with the
+	// displayed animation frames (see ApplyPose)
+	UpdatePhysicsState();
+}
+
+void OutfitStudioFrame::PauseAnimationPlayback() {
+	if (!animPlaying)
+		return;
+
+	animPlaybackTimer.Stop();
+	Unbind(wxEVT_IDLE, &OutfitStudioFrame::OnAnimIdle, this);
+	SetHighResolutionTimers(false);
+	animPlaying = false;
+	SetAnimationPlaybackLock(false);
+
+	// Land on a whole frame, so the pose left behind is the one the player
+	// reports rather than a blend between two of them. Unconditional because
+	// this is also the ApplyPose that rebuilds the mesh BVHs playback skipped.
+	if (GetSelectedAnimation())
+		ApplyAnimationFrame(std::floor(animCurrentFrame), false);
+	else
+		ApplyPose();
+
+	// The frame stays applied, so a paused animation behaves like a pose. Sync
+	// the pose sliders that were skipped while playing.
+	PoseToGUI();
+	UpdateAnimationPlayerUI();
+
+	// Back to the physics pump if physics stays enabled with pose mode on
+	UpdatePhysicsState();
+}
+
+void OutfitStudioFrame::ResetAnimationList() {
+	PauseAnimationPlayback();
+	animCurrentFrame = 0;
+
+	poseDataCollection.animationData.clear();
+
+	// Read again every time, since BodySlide may have changed them
+	const TargetGame targetGame = wxGetApp().targetGame;
+	if (GetPoseHkxFormat(targetGame))
+		poseDataCollection.LoadFavoriteAnimations(GameUtil::TargetGames[targetGame].ToStdString());
+
+	if (cAnimationName) {
+		cAnimationName->Clear();
+		PopulateAnimationList();
+	}
+
+	UpdateAnimationPlayerUI();
+}
+
+void OutfitStudioFrame::PopulateAnimationList() {
+	if (!cAnimationName)
+		return;
+
+	AnimationData* selected = GetSelectedAnimation();
+
+	cAnimationName->Freeze();
+	cAnimationName->Clear();
+	cAnimationName->Append("<None>", (void*)nullptr);
+	cAnimationName->SetSelection(0);
+
+	for (auto& anim : poseDataCollection.animationData) {
+		wxString label = wxString::FromUTF8(anim.name);
+		if (poseDataCollection.IsFavoriteAnimation(anim))
+			label = wxString::FromUTF8(FavoriteStar) + " " + label;
+
+		const int idx = cAnimationName->Append(label, &anim);
+		if (&anim == selected)
+			cAnimationName->SetSelection(idx);
+	}
+
+	cAnimationName->Thaw();
+}
+
+void OutfitStudioFrame::SetAnimationPlaybackLock(bool locked) {
+	const bool enable = !locked;
+
+	if (menuBar) {
+		for (size_t i = 0; i < menuBar->GetMenuCount(); ++i)
+			menuBar->EnableTop(i, enable);
+	}
+
+	// Disabling a container disables its children without discarding their own
+	// enabled state, so whatever the current tab, tool and pose selection had
+	// decided (per-tool toolbar entries, the save/delete pose buttons, Pose to
+	// Mesh) comes back unchanged on unlock.
+	const std::initializer_list<wxWindow*> lockedWindows = {toolBarH,
+															toolBarV,
+															meshTabButton,
+															boneTabButton,
+															colorsTabButton,
+															segmentTabButton,
+															partitionTabButton,
+															lightsTabButton,
+															outfitShapes,
+															outfitBones,
+															sliderScroll,
+															sliderFilter,
+															bonesFilter,
+															masksPane,
+															notesPane,
+															posePane,
+															physicsPane,
+															FindWindow(XRCID("cbFixedWeight")),
+															FindWindow(XRCID("cbNormalizeWeights")),
+															// The player itself stays usable; only the
+															// controls that would swap the animation out
+															// from under it are locked.
+															cAnimationName,
+															FindWindow(XRCID("importAnimationFile"))};
+
+	for (wxWindow* w : lockedWindows) {
+		if (w)
+			w->Enable(enable);
+	}
+
+	// Swallow every menu, toolbar and accelerator command while playing.
+	// Dynamically bound handlers run before the static event table, so this
+	// blocks all of them in one place.
+	if (locked)
+		Bind(wxEVT_MENU, &OutfitStudioFrame::OnBlockedCommandDuringPlayback, this);
+	else
+		Unbind(wxEVT_MENU, &OutfitStudioFrame::OnBlockedCommandDuringPlayback, this);
+}
+
+void OutfitStudioFrame::OnBlockedCommandDuringPlayback(wxCommandEvent& WXUNUSED(event)) {
+	// Intentionally empty: not calling Skip() drops the command.
+}
+
+void OutfitStudioFrame::OnSelectAnimation(wxCommandEvent& WXUNUSED(event)) {
+	PauseAnimationPlayback();
+	animCurrentFrame = 0;
+
+	AnimationData* anim = GetSelectedAnimation();
+	if (anim && !anim->IsLoaded()) {
+		// Favorites are only read once they're picked
+		wxString loadError;
+		bool loaded = false;
+		{
+			wxBusyCursor busy;
+			loaded = PoseDataCollection::LoadAnimationFrames(*anim, loadError);
+		}
+
+		if (!loaded) {
+			wxMessageBox(loadError, _("Load Animation File"), wxOK | wxICON_ERROR, this);
+			cAnimationName->SetSelection(0); // "<None>"
+			anim = nullptr;
+		}
+	}
+
+	if (anim) {
+		// The animation takes over the skeleton pose; deselect any pose in
+		// the pose list without firing its handler.
+		if (auto cPoseName = (wxComboBox*)FindWindowByName("cPoseName"))
+			cPoseName->SetStringSelection("<New>");
+
+		ApplyAnimationFrame(0);
+	}
+	else {
+		// "<None>" sentinel: reset all bones like the "<New>" pose entry.
+		ResetAllPoseBones();
+		PoseToGUI();
+		ApplyPose();
+	}
+
+	UpdateAnimationPlayerUI();
+	UpdatePoseButtonStates();
+}
+
+void OutfitStudioFrame::OnLoadHkxAnimation(wxCommandEvent& WXUNUSED(event)) {
+	wxFileDialog loadDlg(this, _("Select animation file"), wxEmptyString, wxEmptyString, "HKX animation files (*.hkx)|*.hkx", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+	if (loadDlg.ShowModal() == wxID_CANCEL)
+		return;
+
+	std::string skeletonHkxPath;
+	if (!GetReferenceSkeletonHkxPath(skeletonHkxPath, _("Load Animation File")))
+		return;
+
+	// A file that's listed already, as a favorite or loaded before, is selected
+	// instead of being added again
+	const size_t prevCount = poseDataCollection.animationData.size();
+	AnimationData* anim = poseDataCollection.AddAnimationFile(std::string(loadDlg.GetPath().ToUTF8().data()));
+
+	wxString loadError;
+	bool loaded = false;
+	{
+		wxBusyCursor busy;
+		loaded = PoseDataCollection::LoadAnimationFrames(*anim, loadError);
+	}
+
+	if (!loaded) {
+		// A file that can't be read isn't worth listing. New entries go last,
+		// so dropping it doesn't move the selected one.
+		if (poseDataCollection.animationData.size() > prevCount)
+			poseDataCollection.animationData.pop_back();
+
+		wxMessageBox(loadError, _("Load Animation File"), wxOK | wxICON_ERROR, this);
+		return;
+	}
+
+	if (!cAnimationName)
+		return;
+
+	PopulateAnimationList();
+	for (unsigned int i = 0; i < cAnimationName->GetCount(); i++) {
+		if (cAnimationName->GetClientData(i) == anim) {
+			cAnimationName->SetSelection(i);
+			break;
+		}
+	}
+
+	wxCommandEvent dummy;
+	OnSelectAnimation(dummy);
+
+	if (statusBar)
+		statusBar->SetStatusText(_("Animation file loaded."), 0);
+}
+
+void OutfitStudioFrame::OnAnimationFavorite(wxCommandEvent& WXUNUSED(event)) {
+	AnimationData* anim = GetSelectedAnimation();
+	if (!anim)
+		return;
+
+	poseDataCollection.SetFavoriteAnimation(*anim, GameUtil::TargetGames[wxGetApp().targetGame].ToStdString(), !poseDataCollection.IsFavoriteAnimation(*anim));
+
+	PopulateAnimationList();
+	UpdateAnimationPlayerUI();
+}
+
+void OutfitStudioFrame::OnAnimPlayPause(wxCommandEvent& WXUNUSED(event)) {
+	if (animPlaying)
+		PauseAnimationPlayback();
+	else
+		StartAnimationPlayback();
+}
+
+void OutfitStudioFrame::OnAnimFrameSlider(wxScrollEvent& event) {
+	if (!GetSelectedAnimation())
+		return;
+
+	// Seeking teleports the pose; re-seat the physics bodies on it instead of
+	// letting them interpret the jump as a huge velocity.
+	if (physicsRunning)
+		physics->ResetDynamics();
+
+	ApplyAnimationFrame(std::max(event.GetPosition(), 0), !animPlaying);
+
+	// Seeking moves the playhead, so playback has to continue from there.
+	if (animPlaying)
+		RestartAnimationClock();
+}
+
+void OutfitStudioFrame::OnAnimSpeedChanged(wxCommandEvent& WXUNUSED(event)) {
+	// The frame position is derived from the elapsed time and the speed, so the
+	// clock has to restart at the current frame for the new speed to take over
+	// from there rather than jump.
+	if (animPlaying)
+		RestartAnimationClock();
+}
+
+void OutfitStudioFrame::OnAnimInterpolateChanged(wxCommandEvent& WXUNUSED(event)) {
+	AnimationData* anim = GetSelectedAnimation();
+	if (!anim)
+		return;
+
+	// While playing, the next tick picks the new mode up on its own.
+	if (!animPlaying)
+		ApplyAnimationFrame(animCurrentFrame);
+}
+
+void OutfitStudioFrame::OnAnimPlaybackTimer(wxTimerEvent& WXUNUSED(event)) {
+	PumpAnimationPlayback();
+}
+
+void OutfitStudioFrame::OnAnimIdle(wxIdleEvent& event) {
+	if (!animPlaying)
+		return;
+
+	// Idle events asked for with RequestMore come back as fast as the event loop
+	// can spin, so hand the CPU back while the next frame is still a way off
+	// instead of burning a core on the wait. A millisecond at a time stays well
+	// inside one frame even at the 120 fps cap, where frames are 8.3 ms apart.
+	if (GetAnimFrameDueInMicro() > 1500)
+		wxMilliSleep(1);
+	else
+		PumpAnimationPlayback();
+
+	event.RequestMore();
+}
+
+void OutfitStudioFrame::InjectPhysicsCameraYaw(float deltaDegrees) {
+	if (physicsRunning)
+		physics->InjectCameraYaw(deltaDegrees);
+}
+
+void OutfitStudioFrame::OnPhysicsCheckBox(wxCommandEvent& e) {
+	// Physics only simulates while posing or playing; make checking the box
+	// take effect immediately by enabling pose mode along with it.
+	if (e.IsChecked() && !project->bPose && !animPlaying)
+		ActivatePose(true);
+	else
+		UpdatePhysicsState();
+}
+
+void OutfitStudioFrame::OnPhysicsVisCheckBox(wxCommandEvent& e) {
+	if (physics && physicsRunning) {
+		physics->UpdateDebugVis(glView->gls, e.IsChecked());
+		glView->Render();
+	}
+}
+
+void OutfitStudioFrame::OnPhysicsGrabCheckBox(wxCommandEvent& e) {
+	// Turning it off mid-drag is only possible with a lost mouse capture, which
+	// releases the grab already; this is just to be sure nothing keeps pulling.
+	if (!e.IsChecked() && glView)
+		glView->EndPhysicsGrab();
+}
+
+void OutfitStudioFrame::OnPhysicsProbeCheckBox(wxCommandEvent& WXUNUSED(e)) {
+	UpdatePhysicsProbeState();
+}
+
+// The sliders count in tenths of a NIF unit, so dragging one lands on a decimal
+// rather than jumping a whole unit at a time. The field beside it holds the value
+// that is actually used, and can be typed into for anything finer or further out
+// than the slider reaches.
+static constexpr double physicsProbeSliderScale = 10.0;
+
+void OutfitStudioFrame::OnPhysicsProbeSlider(wxScrollEvent& e, wxTextCtrl* text) {
+	if (!text)
+		return;
+
+	// "%g" rather than streaming the value in, which would spell 60 as 60.000000
+	// and leave nothing of it visible in a field this narrow
+	text->ChangeValue(wxString::Format("%g", e.GetPosition() / physicsProbeSliderScale));
+	ApplyPhysicsProbe();
+}
+
+void OutfitStudioFrame::OnPhysicsProbeXSlider(wxScrollEvent& e) {
+	OnPhysicsProbeSlider(e, physicsProbeXText);
+}
+void OutfitStudioFrame::OnPhysicsProbeYSlider(wxScrollEvent& e) {
+	OnPhysicsProbeSlider(e, physicsProbeYText);
+}
+void OutfitStudioFrame::OnPhysicsProbeZSlider(wxScrollEvent& e) {
+	OnPhysicsProbeSlider(e, physicsProbeZText);
+}
+void OutfitStudioFrame::OnPhysicsProbeSizeSlider(wxScrollEvent& e) {
+	OnPhysicsProbeSlider(e, physicsProbeSizeText);
+}
+
+void OutfitStudioFrame::OnPhysicsProbeText(wxTextCtrl* text, wxSlider* slider) {
+	if (!text || !slider)
+		return;
+
+	double val = 0.0;
+	if (!text->GetValue().ToDouble(&val))
+		return;
+
+	// Only to keep the handle where the value is - the slider clamps to its own
+	// range, and a typed value outside it is still the one that gets used.
+	slider->SetValue(static_cast<int>(std::lround(val * physicsProbeSliderScale)));
+	ApplyPhysicsProbe();
+}
+
+void OutfitStudioFrame::OnPhysicsProbeXText(wxCommandEvent& WXUNUSED(e)) {
+	OnPhysicsProbeText(physicsProbeXText, physicsProbeX);
+}
+void OutfitStudioFrame::OnPhysicsProbeYText(wxCommandEvent& WXUNUSED(e)) {
+	OnPhysicsProbeText(physicsProbeYText, physicsProbeY);
+}
+void OutfitStudioFrame::OnPhysicsProbeZText(wxCommandEvent& WXUNUSED(e)) {
+	OnPhysicsProbeText(physicsProbeZText, physicsProbeZ);
+}
+void OutfitStudioFrame::OnPhysicsProbeSizeText(wxCommandEvent& WXUNUSED(e)) {
+	OnPhysicsProbeText(physicsProbeSizeText, physicsProbeSize);
+}
+
+void OutfitStudioFrame::UpdatePhysicsProbeControl(bool enabled) {
+	if (!cbPhysicsProbe)
+		return;
+
+	if (!enabled)
+		cbPhysicsProbe->SetValue(false);
+
+	cbPhysicsProbe->Enable(enabled);
+	UpdatePhysicsProbeState();
+}
+
+// Brings the ball, its sliders and the simulation in line with the checkbox.
+void OutfitStudioFrame::UpdatePhysicsProbeState() {
+	const bool enabled = physicsRunning && cbPhysicsProbe && cbPhysicsProbe->IsChecked();
+
+	// The controls are the only way to place the ball, so they are of no use
+	// while there is no ball to place
+	if (physicsProbePanel && physicsProbePanel->IsShown() != enabled) {
+		physicsProbePanel->Show(enabled);
+
+		// The panel sits inside a collapsible pane, and it is that pane's best
+		// size the tool area lays out against, so it has to be recomputed
+		// before the pane will make room for the sliders.
+		if (physicsPane) {
+			physicsPane->GetPane()->Layout();
+			physicsPane->InvalidateBestSize();
+		}
+
+		UpdateToolScrollLayout();
+	}
+
+	if (enabled) {
+		ApplyPhysicsProbe();
+		return;
+	}
+
+	if (physics)
+		physics->ClearProbe();
+
+	if (glView)
+		glView->HidePhysicsProbe();
+}
+
+// Hands the ball's place and size to the simulation and to the mesh that draws it.
+// The fields are read rather than the sliders, so a value typed finer than the
+// slider steps or beyond the range it covers is the one that counts. Both are in
+// NIF units, the space the simulation works in.
+void OutfitStudioFrame::ApplyPhysicsProbe() {
+	if (!physicsRunning || !physicsProbeXText || !physicsProbeYText || !physicsProbeZText || !physicsProbeSizeText)
+		return;
+
+	double x = 0.0, y = 0.0, z = 0.0, size = 0.0;
+	if (!physicsProbeXText->GetValue().ToDouble(&x) || !physicsProbeYText->GetValue().ToDouble(&y) || !physicsProbeZText->GetValue().ToDouble(&z)
+		|| !physicsProbeSizeText->GetValue().ToDouble(&size))
+		return;
+
+	// A ball with no radius collides with nothing, and there would be nothing to draw
+	if (size <= 0.0)
+		return;
+
+	const Vector3 position(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
+	const float radius = static_cast<float>(size);
+
+	physics->SetProbe(position, radius);
+
+	if (glView) {
+		glView->ShowPhysicsProbe(position, radius);
+		glView->Render();
+	}
+}
+
+void OutfitStudioFrame::UpdatePhysicsGrabControl(bool enabled) {
+	if (!cbPhysicsGrab)
+		return;
+
+	if (!enabled) {
+		cbPhysicsGrab->SetValue(false);
+		if (glView)
+			glView->EndPhysicsGrab();
+	}
+
+	cbPhysicsGrab->Enable(enabled);
+}
+
+bool OutfitStudioFrame::IsPhysicsGrabEnabled() const {
+	return physicsRunning && cbPhysicsGrab && cbPhysicsGrab->IsChecked();
+}
+
+const std::unordered_set<std::string>& OutfitStudioFrame::GetPhysicsAffectedShapes() const {
+	static const std::unordered_set<std::string> none;
+	return physicsRunning ? physics->AffectedShapes() : none;
+}
+
+void OutfitStudioFrame::RefitPhysicsBVH() {
+	if (!physicsRunning)
+		return;
+
+	for (const auto& shapeName : physics->AffectedShapes()) {
+		Mesh* m = glView->GetMesh(shapeName);
+		if (m && m->bvh)
+			m->bvh->Refit();
+	}
+}
+
+bool OutfitStudioFrame::BeginPhysicsGrab(const std::vector<Physics::GrabTarget>& targets) {
+	return physicsRunning && physics->BeginGrab(targets);
+}
+
+void OutfitStudioFrame::UpdatePhysicsGrab(const Vector3& offset) {
+	if (physicsRunning)
+		physics->UpdateGrab(offset);
+}
+
+void OutfitStudioFrame::EndPhysicsGrab() {
+	if (physics)
+		physics->EndGrab();
+}
+
+void OutfitStudioFrame::OnPhysicsWindSlider(wxScrollEvent& WXUNUSED(e)) {
+	ApplyPhysicsWind();
+}
+
+void OutfitStudioFrame::OnPhysicsWindDir(wxCommandEvent& WXUNUSED(e)) {
+	ApplyPhysicsWind();
+}
+
+void OutfitStudioFrame::ApplyPhysicsWind() {
+	if (!physics)
+		return;
+
+	// The choice control lists Physics::WindDirectionNames() in order
+	if (physicsWindDir)
+		physics->SetWindDirection(Physics::WindDirectionFromIndex(physicsWindDir->GetSelection()));
+
+	if (physicsWindSlider)
+		physics->SetWindStrength(physicsWindSlider->GetValue() / 100.0f);
+}
+
+void OutfitStudioFrame::UpdatePhysicsControlsVisibility() {
+	if (!cbPhysics || !physicsPane)
+		return;
+
+	const bool available = project && Physics::HasPhysicsLinks(project->GetWorkNif(), project->shapePhysicsFiles);
+	if (available == physicsAvailable)
+		return;
+
+	physicsAvailable = available;
+
+	// Deleting the last shape with physics while it simulates has to stop it,
+	// and UpdatePhysicsState only ever starts physics for a checked box
+	if (!available)
+		cbPhysics->SetValue(false);
+
+	// The pane belongs to the bones tab; leaving it shows nothing regardless.
+	physicsPane->Show(available && currentTabButton == boneTabButton);
+
+	if (!available)
+		UpdatePhysicsState();
+
+	UpdateToolScrollLayout();
+}
+
+void OutfitStudioFrame::ShutdownPhysics() {
+	StopPhysicsPump();
+	physicsRunning = false;
+
+	if (project)
+		project->physicsPose = nullptr;
+
+	if (physics) {
+		if (glView)
+			physics->UpdateDebugVis(glView->gls, false);
+		physics->Clear();
+	}
+
+	if (cbPhysics)
+		cbPhysics->SetValue(false);
+
+	if (cbPhysicsVis) {
+		cbPhysicsVis->SetValue(false);
+		cbPhysicsVis->Enable(false);
+	}
+
+	UpdatePhysicsGrabControl(false);
+	UpdatePhysicsProbeControl(false);
+}
+
+void OutfitStudioFrame::UpdatePhysicsState() {
+	const bool desired = cbPhysics && cbPhysics->IsChecked() && project && (project->bPose || animPlaying);
+
+	if (desired && !physicsRunning) {
+		if (!physics)
+			physics = std::make_unique<Physics::Controller>();
+
+		std::vector<std::string> warnings;
+		OutfitProject* proj = project;
+		size_t systemCount = physics->BuildFromNif(
+			project->GetWorkNif(),
+			project->GetWorkAnim(),
+			[proj](const std::string& xmlPath) { return proj->GetPhysicsXmlStream(xmlPath); },
+			project->shapePhysicsFiles,
+			warnings);
+
+		for (auto& warning : warnings)
+			wxLogWarning("Physics: %s", warning);
+
+		if (systemCount == 0) {
+			statusBar->SetStatusText(_("No physics XMLs found in loaded meshes"));
+			physics->Clear();
+
+			// Nothing is simulating, so the box must not claim otherwise
+			cbPhysics->SetValue(false);
+			return;
+		}
+
+		statusBar->SetStatusText(wxString::Format(_("Physics active: %zu system(s)"), systemCount));
+		project->physicsPose = &physics->PoseOverrides();
+		physicsRunning = true;
+		UpdatePhysicsShapes();
+		physics->ResetDynamics();
+
+		// The step clock must be valid for the lockstep path too, where
+		// StartPhysicsPump never runs
+		physicsClock.Reset(GetAnimTargetFps());
+
+		// The controller is fresh; re-apply the current wind settings
+		ApplyPhysicsWind();
+
+		if (cbPhysicsVis)
+			cbPhysicsVis->Enable();
+
+		UpdatePhysicsGrabControl(true);
+		UpdatePhysicsProbeControl(true);
+
+		if (!animPlaying)
+			StartPhysicsPump();
+	}
+	else if (!desired && physicsRunning) {
+		// Drop the overrides before the pose is applied again, or the frame
+		// that is supposed to restore the user pose still shows the simulated
+		// one.
+		physicsRunning = false;
+		project->physicsPose = nullptr;
+		physics->UpdateDebugVis(glView->gls, false);
+		physics->Clear();
+		StopPhysicsPump();
+
+		if (cbPhysicsVis) {
+			cbPhysicsVis->SetValue(false);
+			cbPhysicsVis->Enable(false);
+		}
+
+		UpdatePhysicsGrabControl(false);
+		UpdatePhysicsProbeControl(false);
+
+		// Restore the clean user pose without the physics overrides. Also
+		// catches the BVH up with what is displayed: the pump skipped the
+		// rebuild on every tick.
+		ApplyPose();
+	}
+	else if (physicsRunning) {
+		// Animation playback took over or ended: while playing, ApplyPose
+		// steps the simulation in lockstep instead of the pump.
+		if (animPlaying && physicsPumpActive)
+			StopPhysicsPump();
+		else if (!animPlaying && !physicsPumpActive)
+			StartPhysicsPump();
+	}
+
+	// A checked box always means "simulating". Anything that stopped physics -
+	// leaving the bones tab, turning off pose mode, ending playback - clears
+	// it instead of leaving a checked box that does nothing.
+	if (cbPhysics && !physicsRunning)
+		cbPhysics->SetValue(false);
+}
+
+void OutfitStudioFrame::UpdatePhysicsShapes() {
+	if (!physicsRunning || !physics || !project)
+		return;
+
+	// The systems are built from the base shapes of the NIF, so they would
+	// otherwise keep colliding with the shapes the sliders morphed away from
+	std::vector<Vector3> verts;
+	for (auto& shape : project->GetWorkNif()->GetShapes()) {
+		project->GetMorphedVerts(shape, verts);
+		physics->SetShapeVertices(shape->name.get(), verts);
+	}
+}
+
+void OutfitStudioFrame::StartPhysicsPump() {
+	if (physicsPumpActive)
+		return;
+
+	physicsPumpActive = true;
+	physicsClock.Reset(GetAnimTargetFps());
+	SetHighResolutionTimers(true);
+	Bind(wxEVT_IDLE, &OutfitStudioFrame::OnPhysicsIdle, this);
+	physicsTimer.Start(Physics::PumpTimerIntervalMS);
+}
+
+void OutfitStudioFrame::StopPhysicsPump() {
+	if (!physicsPumpActive)
+		return;
+
+	physicsTimer.Stop();
+	Unbind(wxEVT_IDLE, &OutfitStudioFrame::OnPhysicsIdle, this);
+	SetHighResolutionTimers(false);
+	physicsPumpActive = false;
+}
+
+void OutfitStudioFrame::PumpPhysics() {
+	if (!physicsPumpActive || !physicsRunning)
+		return;
+
+	float dtSeconds = 0.0f;
+	if (!physicsClock.StepDue(dtSeconds))
+		return;
+
+	physics->Step(dtSeconds);
+
+	const auto& affectedShapes = physics->AffectedShapes();
+	for (auto& shape : project->GetWorkNif()->GetShapes()) {
+		if (affectedShapes.count(shape->name.get()) == 0)
+			continue;
+
+		std::vector<Vector3> verts;
+		project->GetLiveVerts(shape, verts);
+
+		// BVH rebuilds only serve picking and brushes; way too expensive per
+		// frame. StopPhysicsPump does one full ApplyPose to catch up.
+		glView->UpdateMeshVertices(shape->name.get(), &verts, false, true, false);
+	}
+
+	if (cbPhysicsVis && cbPhysicsVis->IsChecked())
+		physics->UpdateDebugVis(glView->gls, true);
+
+	glView->Render();
+}
+
+void OutfitStudioFrame::OnPhysicsTimer(wxTimerEvent& WXUNUSED(event)) {
+	PumpPhysics();
+}
+
+void OutfitStudioFrame::OnPhysicsIdle(wxIdleEvent& event) {
+	if (!physicsPumpActive)
+		return;
+
+	if (physicsClock.UntilDue() > 1500)
+		wxMilliSleep(1);
+	else
+		PumpPhysics();
+
+	event.RequestMore();
 }
 
 wxBEGIN_EVENT_TABLE(wxGLPanel, wxGLCanvas)
@@ -13833,6 +15056,9 @@ void wxGLPanel::OnShown() {
 	os->toolBarV->ToggleTool(XRCID("btnViewPerspective"), perspectiveView);
 	gls.SetPerspective(perspectiveView);
 
+	gls.SetComplexMaterialEnabled(OutfitStudioConfig.GetBoolValue("Rendering/ComplexMaterial", true));
+	gls.SetPBREnabled(OutfitStudioConfig.GetBoolValue("Rendering/TruePBR", true));
+
 	os->MeshesFromProj();
 
 	UpdateFloor();
@@ -13886,6 +15112,7 @@ void wxGLPanel::SetMeshTextures(
 
 	std::string vShader = Config["AppDir"] + "/res/shaders/default.vert";
 	std::string fShader = Config["AppDir"] + "/res/shaders/default.frag";
+	bool renderAsPBR = false;
 
 	auto targetGame = (TargetGame)Config.GetIntValue("TargetGame");
 	if (targetGame == FO4 || targetGame == FO4VR || targetGame == FO76) {
@@ -13900,8 +15127,15 @@ void wxGLPanel::SetMeshTextures(
 		vShader = Config["AppDir"] + "/res/shaders/ob_default.vert";
 		fShader = Config["AppDir"] + "/res/shaders/ob_default.frag";
 	}
+	else if (m->pbr && gls.IsPBREnabled()) {
+		// A True PBR shape reads its texture slots differently enough from every other Skyrim shape
+		// that it gets its own pair rather than another branch inside the shared one.
+		vShader = Config["AppDir"] + "/res/shaders/sk_truepbr.vert";
+		fShader = Config["AppDir"] + "/res/shaders/sk_truepbr.frag";
+		renderAsPBR = true;
+	}
 
-	GLMaterial* mat = gls.AddMaterial(textureFiles, vShader, fShader, reloadTextures);
+	GLMaterial* mat = gls.AddMaterial(textureFiles, vShader, fShader, reloadTextures, m->hasShader, renderAsPBR);
 	if (mat) {
 		m->material = mat;
 
@@ -14036,6 +15270,13 @@ void wxGLPanel::SetLastTool(ToolID tool) {
 }
 
 void wxGLPanel::OnKeys(wxKeyEvent& event) {
+	// No editing shortcuts while an animation is playing.
+	if (os && os->IsAnimationPlaying()) {
+		brushResizeKeyDown = false;
+		event.Skip();
+		return;
+	}
+
 	// Held-key state for the scroll-to-resize-brush shortcut. Auto-repeat keeps
 	// this set while S is down, and any other key clears it, which together with
 	// OnKeyUp() and OnKillFocus() keeps it from latching on: a stuck flag would
@@ -15335,6 +16576,212 @@ void wxGLPanel::CancelEdgeSlide() {
 	gls.HideSegCursor();
 }
 
+bool wxGLPanel::StartPhysicsGrab(const wxPoint& screenPos) {
+	const auto& affectedShapes = os->GetPhysicsAffectedShapes();
+	if (affectedShapes.empty())
+		return false;
+
+	// The pump skips the BVH update every frame, so the trees still describe
+	// the pose the simulation started from. Fit them to where the mesh is now,
+	// or the grab misses the cloth that has swung away since.
+	os->RefitPhysicsBVH();
+
+	// Any shape the simulation moves can be grabbed, whether or not it is one
+	// of the shapes picked for editing: what is being grabbed is the
+	// simulation, not the project.
+	Vector3 viewDir;
+	Vector3 viewOrigin;
+	gls.GetPickRay(screenPos.x, screenPos.y, nullptr, viewDir, viewOrigin);
+
+	Mesh* hitMesh = nullptr;
+	Vector3 hitMeshPos;
+	float hitDistance = std::numeric_limits<float>::max();
+
+	for (auto* m : gls.GetMeshes()) {
+		if (!m->bVisible || !m->bvh || affectedShapes.count(m->shapeName) == 0)
+			continue;
+
+		Vector3 rayOrigin = m->TransformPosModelToMesh(viewOrigin);
+		Vector3 rayDir = m->TransformDirModelToMesh(viewDir);
+
+		std::vector<IntersectResult> results;
+		if (!m->bvh->IntersectRay(rayOrigin, rayDir, &results))
+			continue;
+
+		for (auto& result : results) {
+			const float distance = result.HitCoord.DistanceTo(rayOrigin);
+			if (distance >= hitDistance)
+				continue;
+
+			hitDistance = distance;
+			hitMesh = m;
+			hitMeshPos = result.HitCoord;
+		}
+	}
+
+	if (!hitMesh)
+		return false;
+
+	std::vector<Physics::GrabTarget> targets;
+	if (!CollectPhysicsGrabTargets(hitMesh, hitMeshPos, targets))
+		return false;
+
+	if (!os->BeginPhysicsGrab(targets))
+		return false;
+
+	// The simulation pulls the grabbed patch out from under the cursor right
+	// away, so the drag reads against a plane through the grabbed spot facing
+	// the camera rather than against the mesh - the move brush freezes a plane
+	// for the same reason.
+	physicsGrabStart = hitMesh->TransformPosMeshToModel(hitMeshPos);
+	physicsGrabPlaneNormal = viewDir * -1.0f;
+	physicsGrabPlaneDist = physicsGrabStart.dot(physicsGrabPlaneNormal);
+
+	ShowPhysicsGrabMarker(physicsGrabStart);
+	return true;
+}
+
+bool wxGLPanel::CollectPhysicsGrabTargets(Mesh* m, const Vector3& meshPos, std::vector<Physics::GrabTarget>& outTargets) {
+	AnimInfo* anim = os->project->GetWorkAnim();
+	auto skinIt = anim->shapeSkinning.find(m->shapeName);
+	if (skinIt == anim->shapeSkinning.end())
+		return false;
+
+	// A patch the size of the brush is taken hold of rather than a single
+	// vertex, so that a grab catches a piece of cloth instead of whichever
+	// bone happens to skin the one vertex under the cursor.
+	const float radius = m->TransformDistModelToMesh(brushSize);
+	if (!(radius > 0.0f))
+		return false;
+
+	Vector3 patchCenter = meshPos;
+	std::vector<IntersectResult> results;
+	m->bvh->IntersectSphere(patchCenter, radius, &results);
+
+	// Falloff towards the rim of the patch, so the pull stays centered on the
+	// cursor instead of dragging the whole bone chain the patch reaches into
+	std::unordered_map<uint16_t, float> patch;
+	for (auto& result : results) {
+		const Triangle& tri = m->tris[result.HitFacet];
+		for (const uint16_t point : {tri.p1, tri.p2, tri.p3}) {
+			if (patch.count(point) != 0)
+				continue;
+
+			const float distance = m->verts[point].DistanceTo(meshPos) / radius;
+			if (distance >= 1.0f)
+				continue;
+
+			patch[point] = 1.0f - distance * distance * (3.0f - 2.0f * distance);
+		}
+	}
+
+	if (patch.empty())
+		return false;
+
+	// Hand the patch over to the bones skinning it: each one gets the share of
+	// it its weights hold, anchored at the center of that share. Anchoring per
+	// bone rather than all of them at the cursor keeps the lever arms short,
+	// so pulling the hem of a skirt bends it instead of spinning its bones.
+	AnimSkin& skin = skinIt->second;
+	float strongest = 0.0f;
+
+	for (auto& boneName : skin.boneNames) {
+		AnimWeight& boneWeight = skin.boneWeights[boneName.second];
+
+		Vector3 anchor;
+		float share = 0.0f;
+
+		for (auto& patchPoint : patch) {
+			auto weightIt = boneWeight.weights.find(patchPoint.first);
+			if (weightIt == boneWeight.weights.end())
+				continue;
+
+			const float weight = patchPoint.second * weightIt->second;
+			if (!(weight > 0.0f))
+				continue;
+
+			// The simulation works in NIF global space, model space is that
+			// same space in render axes and units
+			anchor += Mesh::TransformPosMeshToNif(m->TransformPosMeshToModel(m->verts[patchPoint.first])) * weight;
+			share += weight;
+		}
+
+		if (!(share > 0.0f))
+			continue;
+
+		outTargets.push_back({boneName.first, anchor / share, share});
+		strongest = std::max(strongest, share);
+	}
+
+	if (outTargets.empty())
+		return false;
+
+	// Shares are relative to the bone holding the most of the patch: a patch
+	// spread thin over many bones must not pull harder than a compact one.
+	// Bones barely touching it only add drag, so they are dropped.
+	constexpr float minShare = 0.05f;
+	for (auto& target : outTargets)
+		target.weight /= strongest;
+
+	outTargets.erase(std::remove_if(outTargets.begin(), outTargets.end(), [minShare](const Physics::GrabTarget& target) { return target.weight < minShare; }),
+					 outTargets.end());
+
+	return !outTargets.empty();
+}
+
+void wxGLPanel::UpdatePhysicsGrab(const wxPoint& screenPos) {
+	Vector3 target;
+	if (!gls.CollidePlane(screenPos.x, screenPos.y, target, physicsGrabPlaneNormal, physicsGrabPlaneDist))
+		return;
+
+	os->UpdatePhysicsGrab(Mesh::TransformDiffMeshToNif(target - physicsGrabStart));
+	ShowPhysicsGrabMarker(target);
+}
+
+void wxGLPanel::EndPhysicsGrab() {
+	isPhysicsGrabbing = false;
+	HidePhysicsGrabMarker();
+	os->EndPhysicsGrab();
+}
+
+void wxGLPanel::ShowPhysicsGrabMarker(const Vector3& modelPos) {
+	// Marks where the cursor is pulling to, which is not where the mesh is:
+	// how far the mesh trails behind the marker shows how hard its physics
+	// setup is resisting the grab. Same circle the brush cursor uses, so the
+	// radius it covers reads the same way.
+	Mesh* marker = gls.AddVisCircle(modelPos, physicsGrabPlaneNormal, brushSize, "physicsgrabcircle");
+	if (marker)
+		marker->color = Vector3(1.0f, 0.75f, 0.2f);
+
+	gls.AddVisPoint(modelPos, "physicsgrabcenter")->color = Vector3(1.0f, 0.75f, 0.2f);
+}
+
+void wxGLPanel::HidePhysicsGrabMarker() {
+	gls.DeleteOverlay("physicsgrabcircle");
+	gls.DeleteOverlay("physicsgrabcenter");
+}
+
+void wxGLPanel::ShowPhysicsProbe(const Vector3& nifPos, float nifRadius) {
+	// A mesh rather than an overlay: overlays are drawn after the depth buffer is
+	// cleared, so the ball would float in front of the cloth it is pressed into
+	// instead of sinking behind it, and how deep it has gone is the whole point.
+	// It carries bPrimitive, so nothing treats it as a shape of the project.
+	// Model space is NIF global space in render axes and units.
+	Mesh* m = gls.AddVis3dSphere(Mesh::TransformPosNifToMesh(nifPos), Mesh::TransformDistNifToMesh(nifRadius), Vector3(1.0f, 0.75f, 0.2f), "physicsprobeball", true);
+	if (!m)
+		return;
+
+	// Shaded rather than flat tinted, which the other primitives are. A ball drawn in one
+	// colour is a disc: nothing in it says where its near side is, and reading how far it
+	// has been pushed into the cloth is the whole reason it is on screen. The sphere is
+	// built with per-vertex normals and a tangent space already, so this is all it takes.
+	m->rendermode = Mesh::RenderMode::LitSolid;
+}
+
+void wxGLPanel::HidePhysicsProbe() {
+	gls.DeleteMesh("physicsprobeball");
+}
+
 bool wxGLPanel::StartMoveVertex(const wxPoint& screenPos) {
 	if (lastHitResult.hitMeshName.empty() || lastHitResult.hoverPoint < 0)
 		return false;
@@ -15716,7 +17163,7 @@ std::unordered_map<std::string, std::vector<float>> wxGLPanel::StashMasks() {
 	std::unordered_map<std::string, std::vector<float>> stash;
 	std::vector<Mesh*> meshes = gls.GetMeshes();
 	for (Mesh* m : meshes) {
-		if (!m->mask)
+		if (m->bPrimitive || !m->mask)
 			continue;
 		std::vector<float>& mask = stash[m->shapeName];
 		mask.resize(m->nVerts);
@@ -15728,6 +17175,9 @@ std::unordered_map<std::string, std::vector<float>> wxGLPanel::StashMasks() {
 void wxGLPanel::UnstashMasks(const std::unordered_map<std::string, std::vector<float>>& stash) {
 	std::vector<Mesh*> meshes = gls.GetMeshes();
 	for (Mesh* m : meshes) {
+		if (m->bPrimitive)
+			continue;
+
 		auto stit = stash.find(m->shapeName);
 		if (stit == stash.end())
 			continue;
@@ -16782,7 +18232,11 @@ int wxGLPanel::ConsumeWheelSteps(const wxMouseEvent& event) {
 void wxGLPanel::OnMouseWheel(wxMouseEvent& event) {
 	int delt = event.GetWheelRotation();
 
-	if (event.ControlDown()) {
+	// Switching the edited slider and resizing the brush are both locked out
+	// during playback; zooming falls through.
+	const bool playing = os && os->IsAnimationPlaying();
+
+	if (!playing && event.ControlDown()) {
 		const int steps = ConsumeWheelSteps(event);
 		if (steps == 0)
 			return;
@@ -16823,7 +18277,7 @@ void wxGLPanel::OnMouseWheel(wxMouseEvent& event) {
 			}
 		}
 	}
-	else if (brushResizeKeyDown) {
+	else if (!playing && brushResizeKeyDown) {
 		wxPoint p = event.GetPosition();
 
 		if (brushMode) {
@@ -16858,6 +18312,12 @@ void wxGLPanel::OnMouseWheel(wxMouseEvent& event) {
 void wxGLPanel::OnMouseMove(wxMouseEvent& event) {
 	if (os->IsActive())
 		SetFocus();
+
+	// Mouse motion floods the message queue, which starves both the idle events
+	// and the WM_TIMER that drive playback and physics, so tick them from here
+	// as well.
+	os->PumpAnimationPlayback();
+	os->PumpPhysics();
 
 	bool cursorExists = false;
 	int x;
@@ -16894,8 +18354,9 @@ void wxGLPanel::OnMouseMove(wxMouseEvent& event) {
 			gls.PanCamera(x - lastX, y - lastY);
 		}
 		else {
-			gls.TurnTableCamera(x - lastX);
+			float yawDegrees = gls.TurnTableCamera(x - lastX);
 			gls.PitchCamera(y - lastY);
+			os->InjectPhysicsCameraYaw(yawDegrees);
 			ShowRotationCenter();
 		}
 
@@ -16906,7 +18367,10 @@ void wxGLPanel::OnMouseMove(wxMouseEvent& event) {
 
 	if (lbuttonDown || isMovingVertex || isSlidingEdge) {
 		isLDragging = true;
-		if (isTransforming) {
+		if (isPhysicsGrabbing) {
+			UpdatePhysicsGrab(event.GetPosition());
+		}
+		else if (isTransforming) {
 			UpdateTransform(event.GetPosition());
 		}
 		else if (isMovingPivot) {
@@ -16944,7 +18408,10 @@ void wxGLPanel::OnMouseMove(wxMouseEvent& event) {
 	if (!rbuttonDown && !lbuttonDown && !isMovingVertex && !isSlidingEdge) {
 		GLSurface::CursorHitResult hitResult{};
 
-		if (editMode) {
+		// The brush cursor is hidden during playback: the brushes are locked out
+		// anyway, and it would hit-test against the mesh BVHs that playback
+		// leaves stale, reporting vertices that are not where it draws them.
+		if (editMode && !(os && os->IsAnimationPlaying())) {
 			cursorExists = gls.UpdateCursor(x, y, true, &hitResult);
 		}
 		else {
@@ -17043,6 +18510,22 @@ void wxGLPanel::OnLeftDown(wxMouseEvent& event) {
 
 	lbuttonDown = true;
 
+	// No tool may start editing while an animation plays; the click still falls
+	// through to camera navigation.
+	if (os && os->IsAnimationPlaying())
+		return;
+
+	// A grab feeds the running simulation and never touches the mesh data, so
+	// while it is armed it takes the click ahead of the editing tools. Missing
+	// the simulated mesh leaves the click to them as if it were not.
+	if (os->IsPhysicsGrabEnabled()) {
+		bool meshHit = StartPhysicsGrab(event.GetPosition());
+		if (meshHit) {
+			isPhysicsGrabbing = true;
+			return;
+		}
+	}
+
 	if (transformMode) {
 		bool meshHit = StartTransform(event.GetPosition());
 		if (meshHit) {
@@ -17122,7 +18605,12 @@ void wxGLPanel::OnLeftUp(wxMouseEvent& event) {
 	if (GetCapture() == this)
 		ReleaseMouse();
 
-	if (!isLDragging && !isPainting && activeTool == ToolID::Select) {
+	// OnLeftDown bails out during playback, so none of the edit states below can
+	// be set; only the click-to-select path would still run, and it would pick
+	// against the mesh BVHs that playback leaves stale.
+	const bool playing = os && os->IsAnimationPlaying();
+
+	if (!playing && !isLDragging && !isPainting && !isPhysicsGrabbing && activeTool == ToolID::Select) {
 		int x, y;
 		event.GetPosition(&x, &y);
 
@@ -17130,6 +18618,9 @@ void wxGLPanel::OnLeftUp(wxMouseEvent& event) {
 		if (m)
 			os->SelectShape(m->shapeName);
 	}
+
+	if (isPhysicsGrabbing)
+		EndPhysicsGrab();
 
 	if (isPainting) {
 		EndBrushStroke();
@@ -17184,6 +18675,9 @@ void wxGLPanel::OnLeftUp(wxMouseEvent& event) {
 }
 
 void wxGLPanel::OnCaptureLost(wxMouseCaptureLostEvent& WXUNUSED(event)) {
+	if (isPhysicsGrabbing)
+		EndPhysicsGrab();
+
 	if (isPainting) {
 		EndBrushStroke();
 		isPainting = false;
@@ -17249,6 +18743,9 @@ void wxGLPanel::OnRightUp(wxMouseEvent& WXUNUSED(event)) {
 
 
 bool DnDFile::OnDropFiles(wxCoord, wxCoord, const wxArrayString& fileNames) {
+	if (owner && owner->IsAnimationPlaying())
+		return false;
+
 	if (owner) {
 		NiShape* mergeShape = nullptr;
 		if (owner->activeItem && fileNames.GetCount() == 1)
@@ -17304,6 +18801,9 @@ bool DnDFile::OnDropFiles(wxCoord, wxCoord, const wxArrayString& fileNames) {
 }
 
 bool DnDSliderFile::OnDropFiles(wxCoord, wxCoord, const wxArrayString& fileNames) {
+	if (owner && owner->IsAnimationPlaying())
+		return false;
+
 	if (owner) {
 		bool isMultiple = (fileNames.GetCount() > 1);
 		for (size_t i = 0; i < fileNames.GetCount(); i++) {

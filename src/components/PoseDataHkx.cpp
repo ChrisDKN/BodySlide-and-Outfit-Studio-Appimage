@@ -5,12 +5,20 @@ See the included LICENSE file
 
 #include "PoseData.h"
 #include "../files/HkxFile.h"
+#include "../utils/ConfigurationManager.h"
+#include "../utils/PlatformUtil.h"
+#include "../utils/StringStuff.h"
 
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <wx/filename.h>
+#include <wx/intl.h>
+#include <wx/log.h>
+
+extern ConfigurationManager Config;
 
 namespace {
 
@@ -110,6 +118,8 @@ static HkxQuaternion MatrixToHkxQuaternion(const nifly::Matrix3& matrix) {
 	return quat;
 }
 
+static void ConvertOutfitStudioScaleToHavok(const HKX::Skeleton& skel, PoseData& outPose);
+
 static bool SaveHkxPoseInternal(const std::string& skeletonHkxPath,
 							 const std::string& poseHkxPath,
 							 HKX::Format hkxFormat,
@@ -148,15 +158,24 @@ static bool SaveHkxPoseInternal(const std::string& skeletonHkxPath,
 		return false;
 	}
 
+	// Outfit Studio's skeleton scales a bone's translation by its parents',
+	// Havok's does not, so a pose with scaled bones has to be restated in
+	// Havok's terms before it is written out.
+	PoseData havokPose = pose;
+	ConvertOutfitStudioScaleToHavok(skeleton, havokPose);
+
+	// Keyed lowercase: the pose carries the NIF skeleton's bone names, which
+	// differ in case from the HKX skeleton's for a few Fallout 4 bones
+	// (HEAD/Head, SPINE1/Spine1, SPINE2/Spine2, WEAPON/Weapon).
 	std::unordered_map<std::string, const PoseBoneData*> poseBones;
-	poseBones.reserve(pose.boneData.size());
-	for (const auto& boneData : pose.boneData)
-		poseBones[boneData.name] = &boneData;
+	poseBones.reserve(havokPose.boneData.size());
+	for (const auto& boneData : havokPose.boneData)
+		poseBones[ToLower(boneData.name)] = &boneData;
 
 	std::vector<HKX::Transform> trackTransforms(skeleton.bones.size());
 	for (size_t boneIndex = 0; boneIndex < skeleton.bones.size(); ++boneIndex) {
 		HKX::Transform track = (boneIndex < skeleton.referencePose.size()) ? skeleton.referencePose[boneIndex] : HKX::Transform{};
-		auto it = poseBones.find(skeleton.bones[boneIndex].name);
+		auto it = poseBones.find(ToLower(skeleton.bones[boneIndex].name));
 		if (it != poseBones.end()) {
 			const PoseBoneData& boneData = *it->second;
 			HkxQuaternion quat = MatrixToHkxQuaternion(nifly::RotVecToMat(boneData.rotation));
@@ -188,25 +207,11 @@ static bool SaveHkxPoseInternal(const std::string& skeletonHkxPath,
 
 	return true;
 }
-} // namespace
 
-bool PoseDataCollection::LoadHkxPose(const std::string& skeletonHkxPath, const std::string& animHkxPath, PoseData& outPose, uint32_t frameIndex) {
-	HKX::File skelFile;
-	if (!skelFile.Load(skeletonHkxPath, nullptr) || skelFile.GetSkeletons().empty())
-		return false;
-
-	HKX::File animFile;
-	if (!animFile.Load(animHkxPath, nullptr) || animFile.GetAnimations().empty())
-		return false;
-
-	const HKX::Skeleton& skel = skelFile.GetSkeletons().front();
-	const HKX::Animation& anim = animFile.GetAnimations().front();
-
-	if (anim.numTransformTracks == 0 || anim.numFrames == 0)
-		return false;
-
-	uint32_t frame = std::min(frameIndex, anim.numFrames - 1);
-
+// Extracts one frame of the animation into outPose, matching transform
+// tracks to skeleton bones via the animation binding (when present),
+// otherwise positionally.
+static bool ExtractHkxFramePose(const HKX::Skeleton& skel, const HKX::Animation& anim, uint32_t frame, PoseData& outPose) {
 	outPose.boneData.clear();
 	outPose.absoluteLocal = true;
 
@@ -239,11 +244,183 @@ bool PoseDataCollection::LoadHkxPose(const std::string& skeletonHkxPath, const s
 		bd.translation = nifly::Vector3(xf.translation[0], xf.translation[1], xf.translation[2]);
 		// HKX quaternion is xyzw; QuatToNiflyMat takes (w, x, y, z).
 		bd.rotation = nifly::RotMatToVec(QuatToNiflyMat(xf.rotation[3], xf.rotation[0], xf.rotation[1], xf.rotation[2]));
-		bd.scale = (xf.scale[0] != 0.0f) ? xf.scale[0] : 1.0f;
+		// Bone scales are deliberately dropped; see
+		// ConvertOutfitStudioScaleToHavok for why.
+		bd.scale = 1.0f;
 		outPose.boneData.push_back(std::move(bd));
 	}
 
 	return !outPose.boneData.empty();
+}
+
+// Havok and Outfit Studio disagree about what a bone's scale does. Havok
+// composes bones with hkQsTransform, whose scale does NOT apply to a child's
+// translation, while nifly's MatTransform - and so AnimBone::UpdatePoseTransform
+// - multiplies a child's translation by its parent's scale. Exported poses carry
+// the user's own scales, so their translations are restated in Havok's terms by
+// multiplying in the ancestors' accumulated scale.
+//
+// The import direction needs no such correction because it drops HKX bone scales
+// entirely (see ExtractHkxFramePose): with every scale at 1.0 the two conventions
+// coincide. Nothing is lost, because Bethesda's scale tracks are reciprocal
+// bookkeeping pairs meant to cancel out - measured over 471 shipped Skyrim
+// animations, the scale accumulated at the skinned bones is exactly 1.0 in 465 of
+// them and physically impossible in the rest. Applying what survives quantisation
+// made the character pulse about 1% in size, far more once frames were blended
+// across the sign changes some root tracks contain.
+static void ConvertOutfitStudioScaleToHavok(const HKX::Skeleton& skel, PoseData& outPose) {
+	const size_t nBones = skel.bones.size();
+
+	// Keyed lowercase; see SaveHkxPoseInternal for why.
+	std::unordered_map<std::string, size_t> boneIndices;
+	boneIndices.reserve(nBones);
+	for (size_t i = 0; i < nBones; ++i)
+		boneIndices.emplace(ToLower(skel.bones[i].name), i);
+
+	auto usableScale = [](float scale) { return scale > 0.0f && std::isfinite(scale); };
+
+	// Local scale per bone: the posed value where the pose drives the bone, the
+	// skeleton's reference scale everywhere else.
+	std::vector<float> localScale(nBones, 1.0f);
+	for (size_t i = 0; i < nBones && i < skel.referencePose.size(); ++i) {
+		if (usableScale(skel.referencePose[i].scale[0]))
+			localScale[i] = skel.referencePose[i].scale[0];
+	}
+	for (const PoseBoneData& bd : outPose.boneData) {
+		auto it = boneIndices.find(ToLower(bd.name));
+		if (it != boneIndices.end() && usableScale(bd.scale))
+			localScale[it->second] = bd.scale;
+	}
+
+	// Accumulated scale of each bone's ancestors. Havok skeletons store bones
+	// parent before child, so one forward pass covers the whole hierarchy.
+	std::vector<float> ancestorScale(nBones, 1.0f);
+	for (size_t i = 0; i < nBones; ++i) {
+		int parent = skel.bones[i].parentIndex;
+		if (parent >= 0 && size_t(parent) < i)
+			ancestorScale[i] = ancestorScale[parent] * localScale[parent];
+	}
+
+	for (PoseBoneData& bd : outPose.boneData) {
+		auto it = boneIndices.find(ToLower(bd.name));
+		if (it == boneIndices.end())
+			continue;
+
+		const float scale = ancestorScale[it->second];
+		if (usableScale(scale) && std::fabs(scale - 1.0f) > 1e-6f)
+			bd.translation *= scale;
+	}
+}
+
+// Collects the bones that carry the character through the world: the roots of
+// the skeleton's hierarchies, which is the only place a translation moves the
+// whole character rather than posing a part of it.
+//
+// Note that this deliberately stops at the root and does not walk down the
+// chain of bones whose translation is unlocked. On the Bethesda humanoid
+// skeletons that chain continues into NPC COM [COM ] (Skyrim) / COM (Fallout
+// 4), and that bone is not world motion: it carries the body's vertical bob
+// and weight shift over the planted feet. Freezing it pins the pelvis in
+// space while the legs keep swinging, which makes the feet float and shuffle.
+// Measured over Skyrim's and Fallout 4's shipped animations, the COM track
+// spans several units vertically in a large share of them (Fallout 4: over 4.5
+// units in a quarter of them) while its net start-to-end displacement is zero
+// in all but a handful, so freezing it costs the pose everywhere and prevents
+// drift almost nowhere.
+static std::unordered_set<std::string> CollectRootMotionBoneNames(const HKX::Skeleton& skel) {
+	std::unordered_set<std::string> names;
+
+	for (const HKX::Bone& bone : skel.bones) {
+		if (bone.parentIndex < 0)
+			names.insert(bone.name);
+	}
+
+	return names;
+}
+} // namespace
+
+bool PoseDataCollection::LoadHkxPose(const std::string& skeletonHkxPath, const std::string& animHkxPath, PoseData& outPose, uint32_t frameIndex) {
+	HKX::File skelFile;
+	if (!skelFile.Load(skeletonHkxPath, nullptr) || skelFile.GetSkeletons().empty())
+		return false;
+
+	HKX::File animFile;
+	if (!animFile.Load(animHkxPath, nullptr) || animFile.GetAnimations().empty())
+		return false;
+
+	const HKX::Skeleton& skel = skelFile.GetSkeletons().front();
+	const HKX::Animation& anim = animFile.GetAnimations().front();
+
+	if (anim.numTransformTracks == 0 || anim.numFrames == 0)
+		return false;
+
+	uint32_t frame = std::min(frameIndex, anim.numFrames - 1);
+	return ExtractHkxFramePose(skel, anim, frame, outPose);
+}
+
+bool PoseDataCollection::LoadHkxAnimation(const std::string& skeletonHkxPath, const std::string& animHkxPath, AnimationData& outAnim, std::string* errorOut) {
+	std::string skelError;
+	auto setError = [errorOut](const std::string& message, const std::string& detail = std::string()) {
+		if (errorOut)
+			*errorOut = detail.empty() ? message : message + "\n\n" + detail;
+	};
+
+	HKX::File skelFile;
+	if (!skelFile.Load(skeletonHkxPath, &skelError) || skelFile.GetSkeletons().empty()) {
+		setError("Failed to parse the HKX skeleton data.", skelError);
+		return false;
+	}
+
+	std::string animError;
+	HKX::File animFile;
+	if (!animFile.Load(animHkxPath, &animError) || animFile.GetAnimations().empty()) {
+		setError("Failed to parse the HKX animation data.", animError);
+		return false;
+	}
+
+	const HKX::Skeleton& skel = skelFile.GetSkeletons().front();
+	const HKX::Animation& anim = animFile.GetAnimations().front();
+
+	if (anim.numTransformTracks == 0 || anim.numFrames == 0) {
+		setError("The HKX animation does not contain any frames.");
+		return false;
+	}
+
+	outAnim.frameDuration = (anim.frameDuration > 0.0f && std::isfinite(anim.frameDuration)) ? anim.frameDuration : 1.0f / 30.0f;
+	outAnim.framePoses.clear();
+	outAnim.framePoses.resize(anim.numFrames);
+
+	for (uint32_t frame = 0; frame < anim.numFrames; ++frame) {
+		outAnim.framePoses[frame].name = outAnim.name;
+		if (!ExtractHkxFramePose(skel, anim, frame, outAnim.framePoses[frame])) {
+			setError("The HKX animation tracks could not be matched to the skeleton bones.");
+			return false;
+		}
+	}
+
+	// Strip root motion: in a mesh editor the character walking out of the
+	// viewport is only in the way. Freezing the root motion bones at their
+	// frame 0 translation keeps the animation's starting placement without the
+	// world movement it would apply on top. Everything below the root is left
+	// alone so the body still animates over its feet.
+	const std::unordered_set<std::string> rootMotionBones = CollectRootMotionBoneNames(skel);
+	if (!rootMotionBones.empty() && outAnim.framePoses.size() > 1) {
+		std::unordered_map<std::string, nifly::Vector3> firstFrameTranslations;
+		for (const PoseBoneData& bd : outAnim.framePoses.front().boneData) {
+			if (rootMotionBones.count(bd.name))
+				firstFrameTranslations[bd.name] = bd.translation;
+		}
+
+		for (size_t frame = 1; frame < outAnim.framePoses.size(); ++frame) {
+			for (PoseBoneData& bd : outAnim.framePoses[frame].boneData) {
+				auto it = firstFrameTranslations.find(bd.name);
+				if (it != firstFrameTranslations.end())
+					bd.translation = it->second;
+			}
+		}
+	}
+
+	return true;
 }
 
 bool PoseDataCollection::LoadPoseFile(const std::string& filePath,
@@ -323,4 +500,214 @@ bool PoseDataCollection::SavePoseFile(const std::string& filePath,
 			*errorOut = "Please save the pose with a .hkx, .json, .yaml or .yml extension.";
 		return false;
 	}
+}
+
+bool PoseDataCollection::FindReferenceSkeletonHkx(std::string& outPath, wxString& errorOut) {
+	wxString defSkelNif = wxString::FromUTF8(Config["Anim/DefaultSkeletonReference"]);
+	if (defSkelNif.IsEmpty()) {
+		errorOut = _("No reference skeleton is configured. Please set a reference skeleton in the application settings first.");
+		return false;
+	}
+
+	wxFileName defSkelFn(defSkelNif);
+	if (defSkelFn.IsRelative())
+		defSkelFn = wxFileName(wxString::FromUTF8(Config["AppDir"]) + PathSepChar + defSkelNif);
+	defSkelFn.SetExt("hkx");
+
+	wxString skelHkx = defSkelFn.GetFullPath();
+	if (!wxFileExists(skelHkx)) {
+		errorOut = wxString::Format(_("No Havok skeleton file was found next to the configured reference skeleton.\n\nExpected file:\n%s\n\nPlace a matching .hkx skeleton file alongside the .nif reference skeleton."),
+									skelHkx);
+		return false;
+	}
+
+	outPath = std::string(skelHkx.ToUTF8().data());
+	return true;
+}
+
+AnimationData* PoseDataCollection::AddAnimationFile(const std::string& filePath) {
+	for (auto& anim : animationData)
+		if (StringsEqualInsens(anim.sourcePath.c_str(), filePath.c_str()))
+			return &anim;
+
+	auto nameTaken = [this](const std::string& name) {
+		return std::any_of(animationData.begin(), animationData.end(), [&name](const AnimationData& a) { return a.name == name; });
+	};
+
+	AnimationData anim;
+	anim.sourcePath = filePath;
+	anim.name = wxFileName(wxString::FromUTF8(filePath)).GetName().ToUTF8().data();
+
+	if (nameTaken(anim.name)) {
+		for (int suffix = 2;; ++suffix) {
+			std::string candidate = anim.name + " (" + std::to_string(suffix) + ")";
+			if (!nameTaken(candidate)) {
+				anim.name = candidate;
+				break;
+			}
+		}
+	}
+
+	return AddAnimation(std::move(anim));
+}
+
+bool PoseDataCollection::LoadAnimationFrames(AnimationData& anim, wxString& errorOut) {
+	if (anim.IsLoaded())
+		return true;
+
+	std::string skeletonHkxPath;
+	if (!FindReferenceSkeletonHkx(skeletonHkxPath, errorOut))
+		return false;
+
+	// Read into a copy, so a failure halfway doesn't leave the entry looking loaded
+	AnimationData loaded;
+	loaded.name = anim.name;
+
+	std::string loadError;
+	if (!LoadHkxAnimation(skeletonHkxPath, anim.sourcePath, loaded, &loadError)) {
+		errorOut = loadError.empty() ? _("Failed to load the animation file.") : wxString::FromUTF8(loadError);
+		return false;
+	}
+
+	anim.frameDuration = loaded.frameDuration;
+	anim.framePoses = std::move(loaded.framePoses);
+	return true;
+}
+
+namespace {
+
+std::string AnimationFavoritesFilePath() {
+	return Config["AppDir"] + "/AnimationFavorites.xml";
+}
+
+FILE* OpenAnimationFavoritesFile(const char* mode) {
+	const std::string fileName = AnimationFavoritesFilePath();
+	FILE* fp = nullptr;
+
+#ifdef _WINDOWS
+	std::wstring winFileName = PlatformUtil::MultiByteToWideUTF8(fileName);
+	std::wstring winMode = PlatformUtil::MultiByteToWideUTF8(mode);
+	if (_wfopen_s(&fp, winFileName.c_str(), winMode.c_str()) != 0)
+		return nullptr;
+#else
+	fp = fopen(fileName.c_str(), mode);
+#endif
+
+	return fp;
+}
+
+// The favorites file as it is on disk right now, with or without the game's
+// element. Read again for every change, because the other program may have
+// changed it in the meantime.
+void LoadAnimationFavoritesDoc(tinyxml2::XMLDocument& doc) {
+	FILE* fp = OpenAnimationFavoritesFile("rb");
+	if (fp) {
+		doc.LoadFile(fp);
+		fclose(fp);
+	}
+
+	if (!doc.FirstChildElement("AnimationFavorites")) {
+		doc.Clear();
+		doc.InsertFirstChild(doc.NewDeclaration());
+		doc.InsertEndChild(doc.NewElement("AnimationFavorites"));
+	}
+}
+
+// Favorites inside the game's data folder are stored relative to it, so they
+// keep working when the game is moved or installed somewhere else
+std::string ToStoredFavoritePath(const std::string& path) {
+	const wxString dataPath = wxString::FromUTF8(Config["GameDataPath"]);
+	if (dataPath.IsEmpty())
+		return path;
+
+	wxFileName fileName(wxString::FromUTF8(path));
+	if (!fileName.MakeRelativeTo(dataPath))
+		return path;
+
+	// Somewhere else on the same drive
+	const wxString relPath = fileName.GetFullPath();
+	if (relPath.StartsWith(".."))
+		return path;
+
+	return relPath.ToUTF8().data();
+}
+
+std::string FromStoredFavoritePath(const std::string& storedPath) {
+	wxFileName fileName(wxString::FromUTF8(storedPath));
+	if (fileName.IsAbsolute())
+		return storedPath;
+
+	fileName.MakeAbsolute(wxString::FromUTF8(Config["GameDataPath"]));
+	return fileName.GetFullPath().ToUTF8().data();
+}
+
+// Full paths, whichever way they're stored
+std::vector<std::string> ReadAnimationFavorites(tinyxml2::XMLDocument& doc, const std::string& gameName) {
+	std::vector<std::string> paths;
+
+	XMLElement* gameElement = doc.FirstChildElement("AnimationFavorites")->FirstChildElement(gameName.c_str());
+	if (!gameElement)
+		return paths;
+
+	for (XMLElement* element = gameElement->FirstChildElement("Animation"); element; element = element->NextSiblingElement("Animation"))
+		if (element->GetText())
+			paths.push_back(FromStoredFavoritePath(element->GetText()));
+
+	return paths;
+}
+
+} // namespace
+
+void PoseDataCollection::LoadFavoriteAnimations(const std::string& gameName) {
+	tinyxml2::XMLDocument doc;
+	LoadAnimationFavoritesDoc(doc);
+	favoriteAnimations = ReadAnimationFavorites(doc, gameName);
+
+	for (auto& path : favoriteAnimations)
+		AddAnimationFile(path);
+}
+
+bool PoseDataCollection::IsFavoriteAnimation(const AnimationData& anim) const {
+	return std::any_of(favoriteAnimations.begin(), favoriteAnimations.end(), [&anim](const std::string& path) {
+		return StringsEqualInsens(path.c_str(), anim.sourcePath.c_str());
+	});
+}
+
+void PoseDataCollection::SetFavoriteAnimation(const AnimationData& anim, const std::string& gameName, bool favorite) {
+	if (anim.sourcePath.empty())
+		return;
+
+	tinyxml2::XMLDocument doc;
+	LoadAnimationFavoritesDoc(doc);
+
+	// Starts from the file rather than from this program's list, so favorites
+	// the other program added since aren't lost
+	std::vector<std::string> paths = ReadAnimationFavorites(doc, gameName);
+	paths.erase(std::remove_if(paths.begin(), paths.end(), [&anim](const std::string& path) {
+		return StringsEqualInsens(path.c_str(), anim.sourcePath.c_str());
+	}), paths.end());
+
+	if (favorite)
+		paths.push_back(anim.sourcePath);
+
+	XMLElement* root = doc.FirstChildElement("AnimationFavorites");
+	XMLElement* gameElement = root->FirstChildElement(gameName.c_str());
+	if (gameElement)
+		gameElement->DeleteChildren();
+	else
+		gameElement = root->InsertNewChildElement(gameName.c_str());
+
+	for (auto& path : paths)
+		gameElement->InsertNewChildElement("Animation")->SetText(ToStoredFavoritePath(path).c_str());
+
+	FILE* fp = OpenAnimationFavoritesFile("w");
+	if (fp) {
+		doc.SaveFile(fp);
+		fclose(fp);
+	}
+	else {
+		wxLogWarning("Failed to save the animation favorites to '%s'.", AnimationFavoritesFilePath());
+	}
+
+	favoriteAnimations = std::move(paths);
 }
