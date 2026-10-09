@@ -634,6 +634,7 @@ public:
 	wxCheckListBox* batchBuildList = nullptr;
 	wxMenu* fileCollisionMenu = nullptr;
 	std::vector<std::string> outfitChoiceNames;
+	bool outfitChoiceHasPlaceholder = false;
 	std::vector<std::string> presetChoiceNames;
 	bool populatingChoices = false;
 
@@ -680,6 +681,7 @@ public:
 	void SetPresetChanged(bool changed = true);
 
 	void PopulateOutfitList(const wxArrayString& items, const wxString& selectItem);
+	bool SelectOutfit(const std::string& name);
 	void PopulatePresetList(const wxArrayString& items, const wxString& selectItem);
 	std::string GetSelectedOutfitName() const;
 	std::string GetSelectedPresetName() const;

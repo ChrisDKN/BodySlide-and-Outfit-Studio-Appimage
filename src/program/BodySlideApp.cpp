@@ -956,7 +956,12 @@ void BodySlideApp::ActivateOutfit(const std::string& outfitName) {
 		wxLogError("Failed to load set '%s' from slider set list (%d).", outfitName, error);
 	timing.Mark("create sliders");
 
-	PopulateOutfitList(outfitName);
+	const bool filtersUnchanged = sliderView->search->GetValue() == wxString::FromUTF8(BodySlideConfig["LastGroupFilter"])
+		&& sliderView->outfitsearch->GetValue() == wxString::FromUTF8(BodySlideConfig["LastOutfitFilter"]);
+	auto* filterMenu = sliderView->outfitsearch->GetMenu();
+	auto* outputFilter = filterMenu ? filterMenu->FindItem(XRCID("menuFilterOutputWinners")) : nullptr;
+	if (!filtersUnchanged || (outputFilter && outputFilter->IsChecked()) || !sliderView->SelectOutfit(outfitName))
+		PopulateOutfitList(outfitName);
 	timing.Mark("populate outfits");
 
 	ActivatePreset(activePreset, false);
@@ -6211,6 +6216,7 @@ void BodySlideFrame::ClearPresetList() {
 
 void BodySlideFrame::ClearOutfitList() {
 	outfitChoiceNames.clear();
+	outfitChoiceHasPlaceholder = false;
 	if (outfitChoice)
 		outfitChoice->Clear();
 
@@ -6270,6 +6276,7 @@ void BodySlideFrame::PopulateOutfitList(const wxArrayString& items, const wxStri
 		return;
 
 	outfitChoiceNames.clear();
+	outfitChoiceHasPlaceholder = false;
 
 	for (size_t i = 0; i < items.GetCount(); i++) {
 		std::string rawName = items[i].ToUTF8().data();
@@ -6279,6 +6286,20 @@ void BodySlideFrame::PopulateOutfitList(const wxArrayString& items, const wxStri
 	RebuildOutfitChoice(selectItem.ToUTF8().data());
 }
 
+bool BodySlideFrame::SelectOutfit(const std::string& name) {
+	if (!outfitChoice || outfitChoiceHasPlaceholder)
+		return false;
+
+	int selection = FindChoiceName(outfitChoiceNames, name);
+	if (selection == wxNOT_FOUND)
+		return false;
+
+	wxEventBlocker blocker(outfitChoice, wxEVT_CHOICE);
+	outfitChoice->SetSelection(selection);
+	UpdateFavoriteButtons();
+	return true;
+}
+
 void BodySlideFrame::RebuildOutfitChoice(const std::string& selectItem) {
 	if (!outfitChoice)
 		return;
@@ -6286,6 +6307,10 @@ void BodySlideFrame::RebuildOutfitChoice(const std::string& selectItem) {
 	std::string selectedName = selectItem;
 	if (selectedName.empty())
 		selectedName = GetSelectedOutfitName();
+
+	if (outfitChoiceHasPlaceholder)
+		outfitChoiceNames.pop_back();
+	outfitChoiceHasPlaceholder = false;
 
 	app->SortOutfitNamesForDisplay(outfitChoiceNames);
 
@@ -6303,6 +6328,7 @@ void BodySlideFrame::RebuildOutfitChoice(const std::string& selectItem) {
 	// Append() after BulkSetItems() would corrupt the heap, see GtkChoiceUtil.h.
 	int selection = FindChoiceName(outfitChoiceNames, selectedName);
 	if (selection == wxNOT_FOUND) {
+		outfitChoiceHasPlaceholder = true;
 		wxString missingItem = wxString::FromUTF8(selectedName);
 		if (!missingItem.empty() && !missingItem.StartsWith("["))
 			missingItem = "[" + missingItem + "]";

@@ -10,27 +10,50 @@ See the included LICENSE file
 #include <wx/app.h>
 #include <wx/arrstr.h>
 #include <wx/dialog.h>
+#include <wx/dc.h>
 #include <wx/intl.h>
-#include <wx/listbox.h>
+#include <wx/settings.h>
 #include <wx/sizer.h>
 #include <wx/srchctrl.h>
 #include <wx/weakref.h>
 #include <wx/window.h>
+#include <wx/vlbox.h>
 
 #include <gtk/gtk.h>
 
 namespace {
 
-/// Modal stand-in for the GtkComboBox drop-down.
-///
-/// Selections are tracked as indices into the full item list rather than by
-/// string, so filtering cannot lose track of which entry was picked and
-/// duplicate labels stay distinguishable.
+class ChoiceList : public wxVListBox {
+public:
+	ChoiceList(wxWindow* parent, const wxArrayString& items, const std::vector<int>& rows)
+		: wxVListBox(parent, wxID_ANY), items(items), rows(rows) {}
+
+protected:
+	void OnDrawItem(wxDC& dc, const wxRect& rect, size_t row) const override {
+		dc.SetFont(GetFont());
+		dc.SetTextForeground(IsSelected(row) ? wxSystemSettings::GetColour(wxSYS_COLOUR_HIGHLIGHTTEXT) : GetForegroundColour());
+		dc.DrawText(items[rows[row]], rect.x + FromDIP(4), rect.y + FromDIP(2));
+	}
+
+	wxCoord OnMeasureItem(size_t) const override {
+		return GetCharHeight() + FromDIP(4);
+	}
+
+private:
+	const wxArrayString& items;
+	const std::vector<int>& rows;
+};
+
 class SearchableChoiceDialog : public wxDialog {
 public:
 	SearchableChoiceDialog(wxWindow* parent, const wxString& title, const wxArrayString& items, int selection)
 		: wxDialog(parent, wxID_ANY, title, wxDefaultPosition, wxSize(500, 600), wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
 		, allItems(items) {
+		lowerItems.Alloc(items.size());
+		for (const auto& item : items)
+			lowerItems.Add(item.Lower());
+		itemForRow.reserve(items.size());
+
 		auto* sizer = new wxBoxSizer(wxVERTICAL);
 
 		search = new wxSearchCtrl(this, wxID_ANY);
@@ -39,7 +62,7 @@ public:
 		search->SetDescriptiveText(_("Type to filter..."));
 		sizer->Add(search, 0, wxEXPAND | wxALL, 5);
 
-		listBox = new wxListBox(this, wxID_ANY);
+		listBox = new ChoiceList(this, allItems, itemForRow);
 		sizer->Add(listBox, 1, wxEXPAND | wxLEFT | wxRIGHT, 5);
 
 		sizer->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxALL, 5);
@@ -57,9 +80,7 @@ public:
 	}
 
 	~SearchableChoiceDialog() {
-		// Tearing down a few thousand GtkListBoxRow widgets one at a time takes
-		// noticeably longer than clearing the list first.
-		listBox->Clear();
+		listBox->SetItemCount(0);
 	}
 
 	/// Index into the item list the dialog was constructed with, or wxNOT_FOUND.
@@ -74,25 +95,29 @@ public:
 private:
 	void ApplyFilter(const wxString& filter) {
 		const wxString needle = filter.Lower();
+		const int selected = GetSelectedItem();
+		int selectedRow = wxNOT_FOUND;
 
-		wxArrayString shown;
+		listBox->SetItemCount(0);
 		itemForRow.clear();
 
 		for (size_t i = 0; i < allItems.GetCount(); i++) {
-			if (needle.empty() || allItems[i].Lower().Contains(needle)) {
-				shown.Add(allItems[i]);
+			if (needle.empty() || lowerItems[i].Contains(needle)) {
+				if (static_cast<int>(i) == selected)
+					selectedRow = static_cast<int>(itemForRow.size());
 				itemForRow.push_back(static_cast<int>(i));
 			}
 		}
 
-		listBox->Set(shown);
-		if (!shown.IsEmpty())
-			listBox->SetSelection(0);
+		listBox->SetItemCount(itemForRow.size());
+		if (!itemForRow.empty())
+			listBox->SetSelection(selectedRow == wxNOT_FOUND ? 0 : selectedRow);
 	}
 
 	wxSearchCtrl* search = nullptr;
-	wxListBox* listBox = nullptr;
+	ChoiceList* listBox = nullptr;
 	wxArrayString allItems;
+	wxArrayString lowerItems;
 	std::vector<int> itemForRow; // listbox row -> index in allItems
 };
 
@@ -127,7 +152,7 @@ void ShowChoiceDialog(wxChoice* choice) {
 	choice->ProcessWindowEvent(event);
 }
 
-gboolean OnComboButtonPress(GtkWidget*, GdkEventButton*, gpointer userData) {
+void QueueChoiceDialog(wxChoice* control) {
 	if (!popupOpen) {
 		popupOpen = true;
 
@@ -135,7 +160,7 @@ gboolean OnComboButtonPress(GtkWidget*, GdkEventButton*, gpointer userData) {
 		// inside a GTK signal emission, so defer it to the main loop. The choice
 		// may be destroyed before that happens (settings changes rebuild the
 		// frame), hence the weak reference.
-		wxWeakRef<wxChoice> choice(static_cast<wxChoice*>(userData));
+		wxWeakRef<wxChoice> choice(control);
 		wxTheApp->CallAfter([choice]() {
 			if (choice)
 				ShowChoiceDialog(choice.get());
@@ -143,11 +168,19 @@ gboolean OnComboButtonPress(GtkWidget*, GdkEventButton*, gpointer userData) {
 			popupOpen = false;
 		});
 	}
+}
 
-	// "button-press-event" is RUN_LAST with a boolean-handled accumulator, so
-	// returning TRUE ends the emission before GtkButton's own class handler runs
-	// and toggles the popup open. Nothing needs to be disconnected.
+gboolean OnComboEvent(GtkWidget*, GdkEvent* event, gpointer userData) {
+	if (event->type != GDK_BUTTON_PRESS || event->button.button != GDK_BUTTON_PRIMARY)
+		return FALSE;
+
+	QueueChoiceDialog(static_cast<wxChoice*>(userData));
 	return TRUE;
+}
+
+void OnComboPopup(GtkComboBox* combo, gpointer userData) {
+	g_signal_stop_emission_by_name(combo, "popup");
+	QueueChoiceDialog(static_cast<wxChoice*>(userData));
 }
 
 void FindToggleButton(GtkWidget* child, gpointer data) {
@@ -223,14 +256,14 @@ void BindSearchablePopup(wxChoice* choice) {
 	if (!combo || !GTK_IS_COMBO_BOX(combo))
 		return;
 
-	// The click lands on the combo's internal toggle button. Bind the combo
-	// itself as well in case the layout differs and the event arrives there.
+	// "event" runs before GTK's existing button-press-event popup handler.
 	GtkWidget* toggleButton = nullptr;
 	gtk_container_forall(GTK_CONTAINER(combo), FindToggleButton, &toggleButton);
 	if (toggleButton)
-		g_signal_connect(toggleButton, "button-press-event", G_CALLBACK(OnComboButtonPress), choice);
+		g_signal_connect(toggleButton, "event", G_CALLBACK(OnComboEvent), choice);
 
-	g_signal_connect(combo, "button-press-event", G_CALLBACK(OnComboButtonPress), choice);
+	g_signal_connect(combo, "event", G_CALLBACK(OnComboEvent), choice);
+	g_signal_connect(combo, "popup", G_CALLBACK(OnComboPopup), choice);
 }
 
 } // namespace GtkChoiceUtil

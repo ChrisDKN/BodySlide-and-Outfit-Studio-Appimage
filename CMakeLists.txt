@@ -75,21 +75,12 @@ if(UNIX AND NOT APPLE)
 	endif()
 endif()
 
-# Both programs work around several GTK3 limitations directly (see
-# GtkChoiceUtil). Optional: without it those workarounds compile away and the
-# native widgets are used as-is.
+# Linux requires the GTK3 large-list workarounds in GtkChoiceUtil.
 set(BSOS_HAVE_GTK3 OFF)
 if(UNIX AND NOT APPLE)
-	find_package(PkgConfig QUIET)
-	if(PkgConfig_FOUND)
-		pkg_check_modules(GTK3 QUIET gtk+-3.0)
-		if(GTK3_FOUND)
-			set(BSOS_HAVE_GTK3 ON)
-			message(STATUS "GTK3 found: building with the GTK3 widget workarounds")
-		else()
-			message(STATUS "GTK3 not found: building without the GTK3 widget workarounds")
-		endif()
-	endif()
+	find_package(PkgConfig REQUIRED)
+	pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
+	set(BSOS_HAVE_GTK3 ON)
 endif()
 
 set(BSOS_FBXSDK_HINTS)
