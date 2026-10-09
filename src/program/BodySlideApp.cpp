@@ -7546,7 +7546,7 @@ void BodySlideFrame::OnBatchBuildContext(wxMouseEvent& WXUNUSED(event)) {
 	wxMenu* menu = wxXmlResource::Get()->LoadMenu("batchBuildContext");
 	if (menu) {
 		menu->Bind(wxEVT_MENU, &BodySlideFrame::OnBatchBuildSelect, this);
-		PopupMenu(menu);
+		batchBuildList->PopupMenu(menu);
 		delete menu;
 	}
 }

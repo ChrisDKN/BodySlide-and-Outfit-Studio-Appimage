@@ -1858,11 +1858,13 @@ void OutfitStudioFrame::OnPackProjects(wxCommandEvent& WXUNUSED(event)) {
 
 							if (check)
 								selectedProjects.insert(name);
+							else
+								selectedProjects.erase(name);
 						}
 					}
 				});
 
-				PopupMenu(menu);
+				projectList->PopupMenu(menu);
 				delete menu;
 			}
 		});
