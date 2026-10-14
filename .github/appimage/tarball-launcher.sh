@@ -64,4 +64,7 @@ export PATH="$ROOT/bin:$PATH"
 # reasoning as the AppImage's AppRun.
 unset GTK_MODULES GTK3_MODULES
 
+# Default to X11/XWayland; allow an explicit backend override for comparison.
+export GDK_BACKEND="${GDK_BACKEND:-x11}"
+
 exec "$ROOT/bin/@BIN@" "$@"

@@ -60,6 +60,9 @@ fi
 # child processes, whereas GTK_MODULES arrives from the host.
 unset GTK_MODULES GTK3_MODULES
 
+# Default to X11/XWayland; allow an explicit backend override for comparison.
+export GDK_BACKEND="${GDK_BACKEND:-x11}"
+
 # ---------------------------------------------------------------------------
 # Writable data directory
 # ---------------------------------------------------------------------------

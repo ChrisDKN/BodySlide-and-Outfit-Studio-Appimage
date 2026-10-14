@@ -86,6 +86,7 @@ the tarball.
 
 | Variable | Purpose |
 | --- | --- |
+| `GDK_BACKEND` | The AppImage and portable tarball launchers default to `x11` (XWayland on Wayland desktops) as a workaround for reported UI stalls. Requires an available X11/XWayland server. Set to `wayland` to compare native Wayland behavior; an explicit nonempty value is preserved. |
 | `BSOS_APPDIR` | Data directory: `Config.xml`, `Log_BS.txt` / `Log_OS.txt`, `res/`, `lang/`, and - when it contains a `SliderSets` directory - the project data. Defaults to the directory holding the executable, which is what the tarball launchers use (the extracted root); the AppImage defaults it to `${XDG_DATA_HOME:-~/.local/share}/BodySlide` instead, because its own directory is a read-only mount. |
 | `BSOS_BINDIR` | Directory to launch sibling executables from, used by BodySlide's "Outfit Studio" button. Set this when the data directory holds no executables (AppImage) or when the programs must be started through a wrapper rather than as raw ELF binaries. Defaults to the executable's own directory. |
 | `BSOS_TARGET_GAME` | Game to target. Accepts a name from the list below (case-insensitive) or the raw index. An unrecognised value is logged as a warning and ignored, rather than silently selecting the wrong game. |
